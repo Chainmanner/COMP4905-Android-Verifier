@@ -1,0 +1,61 @@
+// TODO: Add a description for this file.
+
+cc_defaults {
+	name: "recovery_defaults",
+	cflags: [
+		"-D_FILE_OFFSET_BITS=64",
+		"-DRECOVERY_API_VERSION=3",
+		"-Wall",
+		"-Werror",
+	],
+}
+
+cc_defaults {
+	name: "librecovery_defaults",
+	defaults: [
+		"recovery_defaults",
+	],
+	shared_libs: [
+		"android.hardware.health@2.0",
+		"libbase",
+		//"libbootloader_message",
+		"libcrypto",
+		"libcutils",
+		"libfs_mgr",
+		"liblog",
+		"libziparchive",
+	],
+	static_libs: [
+		//"libinstall",
+		//"librecovery_fastboot",
+		//"libminui",
+		//"libotautil",
+
+		// external dependencies
+		"libhealthhalutils",
+		"libfstab",
+	],
+}
+
+cc_binary {
+	name: "recovery",
+	recovery: true,
+	defaults: [
+		"librecovery_defaults",
+	],
+	srcs: [
+		"verifier_main.cpp",
+	],
+	shared_libs: [
+		"librecovery_ui",
+	],
+	static_libs: [
+		"librecovery_ui_default",
+	],
+	required: [
+		"librecovery_ui_ext",
+	],
+	cflags: [
+		"-Wno-unused-parameter",
+	],
+}
