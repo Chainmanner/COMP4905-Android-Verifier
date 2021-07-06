@@ -42,6 +42,18 @@
 
 RecoveryUI* ui = nullptr;
 
+
+// FUNCTIONS
+
+bool SetUSBConfig(std::string mode)
+{
+	android::base::SetProperty("sys.usb.config", mode);
+	return android::base::WaitForProperty("sys.usb.state", mode);
+}
+
+
+// MAIN
+
 int main( int argc, char** argv )
 {
 	// TODO: Anything other preliminary steps?
@@ -81,19 +93,24 @@ int main( int argc, char** argv )
 		device->ResetUI(new StubRecoveryUI());
 	}
 	ui = device->GetUI();
-	ui->SetBackground(RecoveryUI::NO_COMMAND);
-	sleep(1);
 	ui->SetBackground(RecoveryUI::NONE);
-	ui->ShowText(true);
 
 	// TODO: Should probably set the SELinux context.
 
 	// FIXME: TEST CODE BEGINS
 
+	SetUSBConfig("none");
+
+	ui->SetBackground(RecoveryUI::NO_COMMAND);
+	sleep(1);
+	ui->SetBackground(RecoveryUI::NONE);
+	ui->ShowText(true);
 	ui->Print(" TEST RECOVERY\n\n");
-	ui->Print(" Rebooting to the bootloader in 5 seconds...\n\n\n\n");
-	sleep(5);
-	android::base::SetProperty(ANDROID_RB_PROPERTY, "reboot,bootloader");
+	//ui->Print(" Rebooting to the bootloader in 5 seconds...\n\n\n\n");
+	//sleep(5);
+	//android::base::SetProperty(ANDROID_RB_PROPERTY, "reboot,bootloader");
+	ui->Print(" Just gonna stay in an infinite loop if that's cool with y'all.\n\nHold the power button to reboot.\n\n");
+	while(true) {}	// Huh?
 
 	// FIXME: TEST CODE ENDS
 
