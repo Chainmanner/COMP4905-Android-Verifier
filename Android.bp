@@ -44,6 +44,7 @@ cc_binary {
 		"librecovery_defaults",
 	],
 	srcs: [
+		"usb_comms.cpp",
 		"verifier_main.cpp",
 	],
 	shared_libs: [

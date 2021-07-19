@@ -17,6 +17,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#include <errno.h>
 
 #include <atomic>
 #include <string>
@@ -37,19 +38,18 @@
 #include "recovery_ui/stub_ui.h"
 #include "recovery_ui/ui.h"
 
+#include "usb_comms.h"
+
 
 // GLOBALS
 
 RecoveryUI* ui = nullptr;
+// TODO: Add more globals as is necessary.
 
 
 // FUNCTIONS
 
-bool SetUSBConfig(std::string mode)
-{
-	android::base::SetProperty("sys.usb.config", mode);
-	return android::base::WaitForProperty("sys.usb.state", mode);
-}
+// TODO: Nothing here for now.
 
 
 // MAIN
@@ -99,18 +99,32 @@ int main( int argc, char** argv )
 
 	// FIXME: TEST CODE BEGINS
 
-	SetUSBConfig("none");
+	InitFunctionFS();
+	android::base::SetProperty("sys.usb.config", "VERIFIER");
+	android::base::WaitForProperty("sys.usb.state", "VERIFIER");
+
+	struct stat sb;
+	if (stat("/dev/usb-ffs/VERIFIER", &sb) == -1)
+		ui->Print(" FAILED TO STAT /dev/usb-ffs/VERIFIER (%d)\n\n", errno);
+	if (stat("/dev/usb-ffs/VERIFIER/ep0", &sb) == -1)
+		ui->Print(" FAILED TO STAT ep0 (%d)\n\n", errno);
+	if (stat("/dev/usb-ffs/VERIFIER/ep1", &sb) == -1)
+		ui->Print(" FAILED TO STAT ep1 (%d)\n\n", errno);
+	if (stat("/dev/usb-ffs/VERIFIER/ep2", &sb) == -1)
+		ui->Print(" FAILED TO STAT ep2 (%d)\n\n", errno);
+	if (stat("/dev/usb-ffs/VERIFIER/ep3", &sb) == -1)
+		ui->Print(" FAILED TO STAT ep3 (as should be the case) (%d)\n\n", errno);
 
 	ui->SetBackground(RecoveryUI::NO_COMMAND);
 	sleep(1);
 	ui->SetBackground(RecoveryUI::NONE);
 	ui->ShowText(true);
 	ui->Print(" TEST RECOVERY\n\n");
-	//ui->Print(" Rebooting to the bootloader in 5 seconds...\n\n\n\n");
-	//sleep(5);
-	//android::base::SetProperty(ANDROID_RB_PROPERTY, "reboot,bootloader");
-	ui->Print(" Just gonna stay in an infinite loop if that's cool with y'all.\n\nHold the power button to reboot.\n\n");
-	while(true) {}	// Huh?
+	ui->Print(" Rebooting to the bootloader in 5 seconds...\n\n\n\n");
+	sleep(5);
+	android::base::SetProperty(ANDROID_RB_PROPERTY, "reboot,bootloader");
+	//ui->Print(" Just gonna stay in an infinite loop if that's alright.\n\nHold the power button to reboot.\n\n");
+	//while(true) {}	// Huh?
 
 	// FIXME: TEST CODE ENDS
 

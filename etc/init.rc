@@ -2,11 +2,12 @@
 # Some snippets copied almost verbatim; in those cases, comments have been omitted.
 
 import /init.recovery.${ro.hardware}.rc
+import /init.recovery.usb.rc
 
 on early-init
 	restorecon /postinstall
 	start ueventd
-	setprop sys.usb.configfs 0
+	setprop sys.usb.configfs 1
 
 # Inits environment variables, symlinks, directories, and the tmpfs mountpoint.
 on init
@@ -121,8 +122,10 @@ on property:sys.usb.config=none && property:sys.usb.configfs=1
 	setprop sys.usb.state ${sys.usb.config}
 
 on property:sys.usb.config=VERIFIER && property:sys.usb.ffs.ready=1 && property:sys.usb.configfs=1
+	write /config/usb_gadget/g1/UDC "none"
+	write /config/usb_gadget/g1/idVendor 0xE666
 	write /config/usb_gadget/g1/idProduct 0xE666
 	write /config/usb_gadget/g1/configs/b.1/strings/0x409/configuration "VERIFIER"
 	symlink /config/usb_gadget/g1/functions/ffs.VERIFIER /config/usb_gadget/g1/configs/b.1/f1
-	write /config/usb_gadget/g1/UDG ${sys.usb.controller}
+	write /config/usb_gadget/g1/UDC ${sys.usb.controller}
 	setprop sys.usb.state ${sys.usb.config}
