@@ -184,7 +184,33 @@ bool InitFunctionFS()
 	// Good to go.
 	android::base::SetProperty("sys.usb.ffs.ready", "1");
 
-	// TODO: The output and input endpoints also need to be opened.
+	// Opens the output and input endpoints.
+	iOutFD = open(OUT_PATH, O_WRONLY);
+	// TODO: Test if the output FD has been successfully opened.
+	iInFD = open(IN_PATH, O_RDONLY);
+	// TODO: Test if the input FD has been successfully opened.
 
 	return true;
+}
+
+// Closes the FunctionFS file descriptors.
+void CloseFunctionFS()
+{
+	close(iControlFD);
+	close(iOutFD);
+	close(iInFD);
+}
+
+// Wrapper for read(2).
+// Returns either the number of bytes read, or -1 if an error occurred (with errno set appropriately).
+int ReadFromHost(void* inBuf, size_t iNumBytes)
+{
+	return read(iInFD, inBuf, iNumBytes);
+}
+
+// Wrapper for write(2).
+// Returns either the number of bytes written, or -1 if an error occurred (with errno set appropriately).
+int WriteToHost(const void* outBuf, size_t iNumBytes)
+{
+	return write(iOutFD, outBuf, iNumBytes);
 }
