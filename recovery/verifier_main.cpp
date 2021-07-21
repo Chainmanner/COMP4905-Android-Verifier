@@ -120,6 +120,16 @@ int main( int argc, char** argv )
 	ui->SetBackground(RecoveryUI::NONE);
 	ui->ShowText(true);
 	ui->Print(" TEST RECOVERY\n\n");
+
+	int pid = fork();
+	if ( pid == 0 )
+	{
+		char buf[256];
+		ReadFromHost(buf, 256);
+		ui->Print("%s", buf);
+		exit(666);
+	}
+
 	ui->Print(" Rebooting to the bootloader in 5 seconds...\n\n\n\n");
 	sleep(5);
 	android::base::SetProperty(ANDROID_RB_PROPERTY, "reboot,bootloader");

@@ -5,6 +5,7 @@
 
 bool InitFunctionFS();
 void CloseFunctionFS();
-// TODO: Populate this file as is necessary.
+int ReadFromHost(void* inBuf, size_t iNumBytes);
+int WriteToHost(const void* outBuf, size_t iNumBytes);
 
 #endif	// USB_COMMS_H

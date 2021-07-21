@@ -35,11 +35,11 @@ struct usb_interface_descriptor verifier_interface = {
 	.bLength = USB_DT_INTERFACE_SIZE,
 	.bDescriptorType = USB_DT_INTERFACE,
 	.bInterfaceNumber = 0,
-	// Unsure what to put for bAlternateSetting.
 	.bNumEndpoints = 2,
-	.bInterfaceClass = USB_CLASS_VENDOR_SPEC,
-	//.bInterfaceSubclass = USB_SUBCLASS_VENDOR_SPEC,	// FIXME: ???
-	//.bInterfaceProtocol = 3,				// FIXME: ???
+	// Class, subclass, and protocol needed in order to identify the verifier USB interface on the host's end.
+	.bInterfaceClass = 0xd7,
+	.bInterfaceSubClass = 0x9f,
+	.bInterfaceProtocol = 6,
 	.iInterface = 1,
 };
 
