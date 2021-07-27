@@ -201,16 +201,56 @@ void CloseFunctionFS()
 	close(iInFD);
 }
 
-// Wrapper for read(2).
-// Returns either the number of bytes read, or -1 if an error occurred (with errno set appropriately).
+// Reads at most iNumBytes bytes from the host and store them in inBuf.
+// Returns either the number of bytes read, or -1 if an error occurred.
+// NOTE: If an error occurs, data may have still been read to inBuf.
 int ReadFromHost(void* inBuf, size_t iNumBytes)
 {
-	return read(iInFD, inBuf, iNumBytes);
+	char* inBuf_curPtr = (char*)inBuf;	// Must be char*; void* arithmetic not allowed.
+	size_t bytesLeftToRead = iNumBytes;
+	size_t bytesReadTotal = 0;
+	size_t bytesRead;
+	size_t bytesToRead;
+
+	while ( bytesLeftToRead > 0 )
+	{
+		bytesToRead = bytesLeftToRead < NUM_BUFS * BUF_SIZE ? bytesLeftToRead : NUM_BUFS * BUF_SIZE;
+		bytesRead = read(iInFD, inBuf_curPtr, bytesToRead);
+		if ( bytesRead < 0 )	// Error occurred!
+			return -1;
+		bytesLeftToRead -= bytesRead;
+		bytesReadTotal += bytesRead;
+		inBuf_curPtr += bytesRead;
+		if ( bytesRead < bytesToRead )	// Read less bytes than expected; end of transmission.
+			break;
+	}
+	return bytesReadTotal;
+	//return read(iInFD, inBuf, iNumBytes);
 }
 
-// Wrapper for write(2).
+// Sends at most iNumBytes bytes from outBuf to the host.
 // Returns either the number of bytes written, or -1 if an error occurred (with errno set appropriately).
+// NOTE: If an error occurs, data from outBuf may have still been sent to the host.
 int WriteToHost(const void* outBuf, size_t iNumBytes)
 {
-	return write(iOutFD, outBuf, iNumBytes);
+	char* outBuf_curPtr = (char*)outBuf;
+	size_t bytesLeftToWrite = iNumBytes;
+	size_t bytesWrittenTotal = 0;
+	size_t bytesWritten;
+	size_t bytesToWrite;
+
+	while ( bytesLeftToWrite > 0 )
+	{
+		bytesToWrite = bytesLeftToWrite < NUM_BUFS * BUF_SIZE ? bytesLeftToWrite : NUM_BUFS * BUF_SIZE;
+		bytesWritten = write(iOutFD, outBuf_curPtr, bytesToWrite);
+		if ( bytesWritten < 0 )
+			return -1;
+		bytesLeftToWrite -= bytesWritten;
+		bytesWrittenTotal += bytesWritten;
+		outBuf_curPtr += bytesWritten;
+		if ( bytesWritten < bytesToWrite )
+			break;
+	}
+	return bytesWrittenTotal;
+	//return write(iOutFD, outBuf, iNumBytes);
 }
