@@ -1,4 +1,5 @@
 // TODO: Add a description about this file.
+// TODO: Need to add MitM protections, if possible.
 
 // IMPORTS
 
@@ -24,6 +25,9 @@
 #include <thread>
 #include <vector>
 
+#include <selinux/label.h>
+#include <selinux/selinux.h>
+
 #include <android-base/file.h>
 #include <android-base/logging.h>
 #include <android-base/properties.h>
@@ -32,7 +36,6 @@
 #include <cutils/android_reboot.h>
 #include <cutils/sockets.h>
 #include <private/android_logger.h> /* private pmsg functions */
-// TODO: May need to take SELinux into account here.
 
 #include "recovery_ui/device.h"
 #include "recovery_ui/stub_ui.h"
@@ -41,10 +44,34 @@
 #include "usb_comms.h"
 
 
+// PREPROCESSOR DEFS
+// NOTE: The following preprocessor defs MUST ALSO be defined on the host side, for consistency.
+
+#define FILE_PATH_MAX_LEN 512	// Not including the null terminator.
+#define ERROR_MESSAGE_MAX_LEN 128	// Again, doesn't include the null terminator.
+
+#define CMD_GET_FILE 0x2c
+#define CMD_SHUTDOWN 0x4d
+
+#define SUCCESS "\x11"
+#define ERR_NO_FILE "\x22"
+#define ERR_STAT "\x3e"
+#define ERR_IRREGULAR_FILE "\x8f'
+
+// Apparently the stat struct may differ across architectures, so to be safe, here's a definition with only the necessary types.
+struct file_metadata {
+	uid_t	uid;
+	gid_t	gid;
+	mode_t	mode;
+	off_t	fileSize;
+	size_t	contextLen;
+	char selinuxContext[];
+};
+
+
 // GLOBALS
 
 RecoveryUI* ui = nullptr;
-// TODO: Add more globals as is necessary.
 
 
 // FUNCTIONS
@@ -94,49 +121,71 @@ int main( int argc, char** argv )
 	}
 	ui = device->GetUI();
 	ui->SetBackground(RecoveryUI::NONE);
+	ui->ShowText(true);
 
 	// TODO: Should probably set the SELinux context.
 
-	// FIXME: TEST CODE BEGINS
+	ui->Print(" VERIFIER\n\n");
 
-	InitFunctionFS();
+	// Sets up FunctionFS.
+	// TODO: Are there phones currently in use that DON'T support ConfigFS and/or FunctionFS? If so, I need to account for them.
+	if ( !InitFunctionFS() )
+	{
+		ui->Print(" !! Failed to init FunctionFS! Rebooting to bootloader... !!\n\n");
+		android::base::SetProperty(ANDROID_RB_PROPERTY, "reboot,bootloader");
+		return -EIO;
+	}
 	android::base::SetProperty("sys.usb.config", "VERIFIER");
 	android::base::WaitForProperty("sys.usb.state", "VERIFIER");
+	ui->Print(" FunctionFS set up\n\n");
 
-	struct stat sb;
-	if (stat("/dev/usb-ffs/VERIFIER", &sb) == -1)
-		ui->Print(" FAILED TO STAT /dev/usb-ffs/VERIFIER (%d)\n\n", errno);
-	if (stat("/dev/usb-ffs/VERIFIER/ep0", &sb) == -1)
-		ui->Print(" FAILED TO STAT ep0 (%d)\n\n", errno);
-	if (stat("/dev/usb-ffs/VERIFIER/ep1", &sb) == -1)
-		ui->Print(" FAILED TO STAT ep1 (%d)\n\n", errno);
-	if (stat("/dev/usb-ffs/VERIFIER/ep2", &sb) == -1)
-		ui->Print(" FAILED TO STAT ep2 (%d)\n\n", errno);
-	if (stat("/dev/usb-ffs/VERIFIER/ep3", &sb) == -1)
-		ui->Print(" FAILED TO STAT ep3 (as should be the case) (%d)\n\n", errno);
-
-	ui->SetBackground(RecoveryUI::NO_COMMAND);
-	sleep(1);
-	ui->SetBackground(RecoveryUI::NONE);
-	ui->ShowText(true);
-	ui->Print(" TEST RECOVERY\n\n");
-
-	int pid = fork();
-	if ( pid == 0 )
+	// Device-side verifier loop. Receives and executes commands from the host.
+	// TODO: Comms have no encryption or verification. Implement that!
+	ui->Print(" Ready to receive commands...\n\n");
+	char recvMsg[FILE_PATH_MAX_LEN + 2];	// Includes the action to perform, the file to send (if applicable), and the null end.
+	struct stat statbuf;
+	struct file_metadata fm;
+	char filepath[FILE_PATH_MAX_LEN + 1];
+	int filepathLen;
+	while (1)
 	{
-		char buf[256];
-		ReadFromHost(buf, 256);
-		ui->Print("%s", buf);
-		exit(666);
+		ReadFromHost(recvMsg, FILE_PATH_MAX_LEN + 1);
+		switch ( recvMsg[0] )	// First byte indicates the action to undertake.
+		{
+			case CMD_GET_FILE:
+				filepathLen = strnlen(recvMsg + 1, FILE_PATH_MAX_LEN);
+				strncpy(filepath, recvMsg + 1, filepathLen);
+				filepath[filepathLen] = '\0';
+
+				if ( stat(filepath, &statbuf) == -1 )
+				{
+					ui->Print(" !! Could not stat %s: %s !!\n\n", filepath, strerror(errno));
+					WriteToHost(ERR_STAT, 1);
+					break;
+				}
+				if ( !S_ISREG(statbuf.st_mode) )	// Don't act upon whatever isn't a normal file.
+				{
+					ui->Print(" !! %s is not a regular file !!\n\n", filepath);
+					WriteToHost(ERR_IRREGULAR_FILE, 1);
+					break;
+				}
+				
+				// First, let's have the permission stats: st_mode, st_uid, st_gid, and the SELinux context.
+				// After that, we include the whole file itself.
+				// TODO
+
+				break;
+			case CMD_SHUTDOWN:
+				WriteToHost(SUCCESS, 1);
+				ui->Print(" Rebooting to the bootloader in 5 seconds. Have a nice day!\n\n");
+				sleep(5);
+				android::base::SetProperty(ANDROID_RB_PROPERTY, "reboot,bootloader");
+				return EXIT_SUCCESS;
+			default:
+				ui->Print(" Unknown command %hhX followed by %s\n\n", recvMsg[0], recvMsg + 1);
+				break;
+		}
 	}
-
-	ui->Print(" Rebooting to the bootloader in 5 seconds...\n\n\n\n");
-	sleep(5);
-	android::base::SetProperty(ANDROID_RB_PROPERTY, "reboot,bootloader");
-	//ui->Print(" Just gonna stay in an infinite loop if that's alright.\n\nHold the power button to reboot.\n\n");
-	//while(true) {}	// Huh?
-
-	// FIXME: TEST CODE ENDS
 
 	return EXIT_SUCCESS;
 }

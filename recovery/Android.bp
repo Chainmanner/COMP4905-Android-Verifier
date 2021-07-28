@@ -24,6 +24,7 @@ cc_defaults {
 		"libfs_mgr",
 		"liblog",
 		"libziparchive",
+		"libselinux",
 	],
 	static_libs: [
 		//"libinstall",
