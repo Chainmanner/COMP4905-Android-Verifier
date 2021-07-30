@@ -2,6 +2,7 @@
 // TODO: Need to add MitM protections, if possible.
 
 // IMPORTS
+// TODO: Clean up unused imports.
 
 #include <dlfcn.h>
 #include <errno.h>
@@ -41,32 +42,8 @@
 #include "recovery_ui/stub_ui.h"
 #include "recovery_ui/ui.h"
 
+#include "verifier_constants.h"
 #include "usb_comms.h"
-
-
-// PREPROCESSOR DEFS
-// NOTE: The following preprocessor defs MUST ALSO be defined on the host side, for consistency.
-
-#define FILE_PATH_MAX_LEN 512	// Not including the null terminator.
-#define ERROR_MESSAGE_MAX_LEN 128	// Again, doesn't include the null terminator.
-
-#define CMD_GET_FILE 0x2c
-#define CMD_SHUTDOWN 0x4d
-
-#define SUCCESS "\x11"
-#define ERR_NO_FILE "\x22"
-#define ERR_STAT "\x3e"
-#define ERR_IRREGULAR_FILE "\x8f'
-
-// Apparently the stat struct may differ across architectures, so to be safe, here's a definition with only the necessary types.
-struct file_metadata {
-	uid_t	uid;
-	gid_t	gid;
-	mode_t	mode;
-	off_t	fileSize;
-	size_t	contextLen;
-	char selinuxContext[];
-};
 
 
 // GLOBALS
@@ -142,41 +119,116 @@ int main( int argc, char** argv )
 	// Device-side verifier loop. Receives and executes commands from the host.
 	// TODO: Comms have no encryption or verification. Implement that!
 	ui->Print(" Ready to receive commands...\n\n");
-	char recvMsg[FILE_PATH_MAX_LEN + 2];	// Includes the action to perform, the file to send (if applicable), and the null end.
+	char recvMsg[1 + ARG_MAX_LEN];	// Includes the action to perform and the file to send (if applicable).
 	struct stat statbuf;
 	struct file_metadata fm;
-	char filepath[FILE_PATH_MAX_LEN + 1];
-	int filepathLen;
+	char filepath[ARG_MAX_LEN];
+	int filepathLen, fileFD;
+	long bytesRead;
+	char* selinuxContext_temp = nullptr;
+	void* response;
+	int responseLen;
+	int bytesSent;
 	while (1)
 	{
-		ReadFromHost(recvMsg, FILE_PATH_MAX_LEN + 1);
+		memset(recvMsg, '\0', 1 + ARG_MAX_LEN);
+		ReadFromHost(recvMsg, 1 + ARG_MAX_LEN);
 		switch ( recvMsg[0] )	// First byte indicates the action to undertake.
 		{
-			case CMD_GET_FILE:
-				filepathLen = strnlen(recvMsg + 1, FILE_PATH_MAX_LEN);
+			// TODO: Mounting the partitions...
+			case CMD_GET_FILE:	// TODO: TEST THIS
+				filepathLen = strnlen(recvMsg + 1, ARG_MAX_LEN-1);
+				if ( filepathLen == 0 )
+				{
+					ui->Print(" !! No filename provided !!\n\n");
+					WriteToHost(ERR_NO_FILE, 1);
+					break;
+				}
 				strncpy(filepath, recvMsg + 1, filepathLen);
 				filepath[filepathLen] = '\0';
+				// Disallow directory climbing - check everywhere for "../", and check for "/.." at the end.
+				if ( strstr(filepath, "../") || !strncmp(filepath + filepathLen - 3, "/..", 3) )
+				{
+					ui->Print(" !! Directory climbing detected: %s !!\n\n", filepath);
+					WriteToHost(ERR_DIR_CLIMBING, 1);
+					break;
+				}
 
-				if ( stat(filepath, &statbuf) == -1 )
+				// Get the file metadata.
+				if ( lstat(filepath, &statbuf) == -1 )
 				{
 					ui->Print(" !! Could not stat %s: %s !!\n\n", filepath, strerror(errno));
 					WriteToHost(ERR_STAT, 1);
 					break;
 				}
-				if ( !S_ISREG(statbuf.st_mode) )	// Don't act upon whatever isn't a normal file.
+				if ( statbuf.st_size > MAX_FILE_SIZE )
 				{
-					ui->Print(" !! %s is not a regular file !!\n\n", filepath);
-					WriteToHost(ERR_IRREGULAR_FILE, 1);
+					ui->Print(" !! %s is too big (%ld bytes; limit is %ld bytes) !!\n\n", filepath,
+							statbuf.st_size, MAX_FILE_SIZE);
+					WriteToHost(ERR_FILE_TOO_BIG, 1);
 					break;
 				}
+
+				responseLen = 1 + ARG_MAX_LEN + sizeof(struct file_metadata)
+						+ (S_ISREG(statbuf.st_mode) ? statbuf.st_size : 0);
+				response = malloc(responseLen);
+				strncpy((char*)response, SUCCESS, 1);
 				
-				// First, let's have the permission stats: st_mode, st_uid, st_gid, and the SELinux context.
-				// After that, we include the whole file itself.
-				// TODO
+				// First, for the sake of request-response integrity, reply with the file path.
+				strncpy((char*)response + 1, filepath, ARG_MAX_LEN-1);
+				
+				// Then, let's have the permission stats: st_mode, st_uid, st_gid, and the SELinux context.
+				fm.uid = statbuf.st_uid;
+				fm.gid = statbuf.st_gid;
+				fm.mode = statbuf.st_mode;
+				fm.fileSize = (S_ISREG(statbuf.st_mode) ? statbuf.st_size : 0);
+				fm.contextLen = getfilecon(filepath, &selinuxContext_temp);
+				if ( fm.contextLen > SELINUX_CONTEXT_MAX_LEN - 1 )
+				{
+					fm.contextLen = SELINUX_CONTEXT_MAX_LEN - 1;
+				}
+				strncpy(fm.selinuxContext, selinuxContext_temp, fm.contextLen);
+				fm.selinuxContext[fm.contextLen] = '\0';
+				memcpy((char*)response + 1 + ARG_MAX_LEN, &fm, sizeof(struct file_metadata));
+
+				// After that, we include the file size and the whole file itself.
+				// Obviously not applicable in the case of directories or other non-regular files.
+				if ( S_ISREG(statbuf.st_mode) )
+				{
+					fileFD = open(filepath, O_RDONLY);
+					if ( fileFD < 0 )
+					{
+						ui->Print(" !! Failed to open %s: %s !!\n\n", filepath, strerror(errno));
+						WriteToHost(ERR_OPEN, 1);
+						break;
+					}
+					// FIXME: This is stupid. I should be sending the file block-by-block.
+					bytesRead = read(fileFD, (char*)response + 1 + ARG_MAX_LEN + sizeof(struct file_metadata),
+							statbuf.st_size);
+					if ( bytesRead < 0 )
+					{
+						ui->Print(" !! Error while reading %s: %s !!\n\n", filepath, strerror(errno));
+						WriteToHost(ERR_READ, 1);
+						break;
+					}
+					if ( bytesRead != statbuf.st_size )
+					{
+						// I doubt this'll ever happen, but I'm adding a check for it anyway.
+						ui->Print(" !! Bytes read from %s (%ld) does not match file size (%ld) !!\n\n",
+							filepath, bytesRead, statbuf.st_size);
+						WriteToHost(ERR_READ_SIZE_MISMATCH, 1);
+						break;
+					}
+					close(fileFD);
+					bytesSent = WriteToHost(response, responseLen);
+					if ( bytesSent < 0 )
+						ui->Print(" !! Failed to send %s to the host: %s !!\n\n", filepath, strerror(errno));
+					else
+						ui->Print(" File %s sent to host\n\n", filepath);
+				}
 
 				break;
-			case CMD_SHUTDOWN:
-				WriteToHost(SUCCESS, 1);
+			case CMD_SHUTDOWN:	// TODO: TEST THIS
 				ui->Print(" Rebooting to the bootloader in 5 seconds. Have a nice day!\n\n");
 				sleep(5);
 				android::base::SetProperty(ANDROID_RB_PROPERTY, "reboot,bootloader");

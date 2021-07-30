@@ -1,5 +1,5 @@
 // TEST CODE FOR USB COMMS
-// CONTAINS POTENTIALLY DANGEROUS CODE - DO NOT USE IN FINAL VERSION
+// FIXME: CONTAINS POTENTIALLY DANGEROUS CODE - DO NOT USE IN FINAL VERSION
 
 // Build using the following command:
 //	gcc -o usbtest usbtest.c
@@ -13,6 +13,8 @@
 #include <string.h>
 #include <linux/usbdevice_fs.h>
 #include <linux/usb/ch9.h>
+
+#include "verifier_constants.h"
 
 // Taken almost verbatim from system/core/fastboot/usb_linux.cpp of the Android source code.
 int isInvalidDescriptor(void* desc, int len, unsigned type, int size)
@@ -134,16 +136,63 @@ int main(int argc, char** argv)
 		return -1;
 	}
 
+	// ==== COMMS TEST BEGINS ====
+
+	struct usbdevfs_bulktransfer bulk;
+
 	// Write some data just to see that the USB connection works.
 	const char* testData = "wow such test, very amaze\n\n";
-	struct usbdevfs_bulktransfer bulk;
 	bulk.ep = epOutID;
 	bulk.len = strlen(testData);	// The minimum max bulk transfer size is 16 KiB (for Linux < 3.3), and this is way under that.
 	bulk.data = testData;
 	bulk.timeout = 0;
 	if ( ioctl(descFD, USBDEVFS_BULK, &bulk) < 0 )
 	{
-		perror("ioctl (USBDEVFS_BULK write)");
+		perror("ioctl (write test)");
+		return -1;
+	}
+
+	// Write some data yet again, this time listening for a response.
+	const char* testCmd = "\x9finit.rc";
+	bulk.ep = epOutID;
+	bulk.len = strlen(testCmd);
+	bulk.data = testCmd;
+	bulk.timeout = 0;
+	if ( ioctl(descFD, USBDEVFS_BULK, &bulk) < 0 )
+	{
+		perror("ioctl (cmd test)");
+		return -1;
+	}
+	char testRecv[65536];
+	bulk.ep = epInID;
+	bulk.len = 65536;
+	bulk.data = testRecv;
+	bulk.timeout = 0;
+	if ( ioctl(descFD, USBDEVFS_BULK, &bulk) < 0 )
+	{
+		perror("ioctl (cmd response)");
+		return -1;
+	}
+	char status = testRecv[0];
+	char filename[ARG_MAX_LEN];
+	strncpy(filename, testRecv + 1, ARG_MAX_LEN);
+	struct file_metadata fmeta;
+	memcpy(&fmeta, testRecv + 1 + ARG_MAX_LEN, sizeof(struct file_metadata));
+	printf( "uid: %d\ngid: %d\nmode: %o\nsize: %ld\ncontext:%s\n", fmeta.uid, fmeta.gid, fmeta.mode, fmeta.fileSize,
+		fmeta.selinuxContext);
+	int testWriteFD = open("./wow", O_WRONLY | O_CREAT);
+	write(testWriteFD, testRecv + 1 + ARG_MAX_LEN + sizeof(struct file_metadata), fmeta.fileSize);
+	close(testWriteFD);
+	
+	// Reboot the phone to the bootloader.
+	const char* shutdownCmd = "\x5d";
+	bulk.ep = epOutID;
+	bulk.len = strlen(shutdownCmd);
+	bulk.data = shutdownCmd;
+	bulk.timeout = 0;
+	if ( ioctl(descFD, USBDEVFS_BULK, &bulk) < 0 )
+	{
+		perror("ioctl (shutdown)");
 		return -1;
 	}
 
