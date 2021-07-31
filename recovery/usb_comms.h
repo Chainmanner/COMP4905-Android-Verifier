@@ -5,7 +5,7 @@
 
 bool InitFunctionFS();
 void CloseFunctionFS();
-int ReadFromHost(void* inBuf, size_t iNumBytes);
-int WriteToHost(const void* outBuf, size_t iNumBytes);
+ssize_t ReadFromHost(void* inBuf, size_t iNumBytes);
+ssize_t WriteToHost(const void* outBuf, size_t iNumBytes);
 
 #endif	// USB_COMMS_H

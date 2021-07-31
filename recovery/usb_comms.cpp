@@ -204,7 +204,7 @@ void CloseFunctionFS()
 // Reads at most iNumBytes bytes from the host and store them in inBuf.
 // Returns either the number of bytes read, or -1 if an error occurred.
 // NOTE: If an error occurs, data may have still been read to inBuf.
-int ReadFromHost(void* inBuf, size_t iNumBytes)
+ssize_t ReadFromHost(void* inBuf, size_t iNumBytes)
 {
 	char* inBuf_curPtr = (char*)inBuf;	// Must be char*; void* arithmetic not allowed.
 	size_t bytesLeftToRead = iNumBytes;
@@ -231,11 +231,11 @@ int ReadFromHost(void* inBuf, size_t iNumBytes)
 // Sends at most iNumBytes bytes from outBuf to the host.
 // Returns either the number of bytes written, or -1 if an error occurred (with errno set appropriately).
 // NOTE: If an error occurs, data from outBuf may have still been sent to the host.
-int WriteToHost(const void* outBuf, size_t iNumBytes)
+ssize_t WriteToHost(const void* outBuf, size_t iNumBytes)
 {
 	char* outBuf_curPtr = (char*)outBuf;
 	size_t bytesLeftToWrite = iNumBytes;
-	size_t bytesWrittenTotal = 0;
+	ssize_t bytesWrittenTotal = 0;
 	size_t bytesWritten;
 	size_t bytesToWrite;
 
