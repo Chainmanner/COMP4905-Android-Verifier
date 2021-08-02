@@ -15,8 +15,8 @@
 #define INTERFACE_CLASS 0xd7
 #define INTERFACE_SUBCLASS 0x9f
 #define INTERFACE_PROTOCOL 6
-#define IN_ADDR (1 | USB_DIR_IN)
-#define OUT_ADDR (1 | USB_DIR_OUT)
+#define IN_ADDR (1 | USB_DIR_IN)	// NOTE: "In" from the host's perspective.
+#define OUT_ADDR (1 | USB_DIR_OUT)	// NOTE: "Out" from the host's perspective.
 
 // Commands
 #define CMD_MNT_DEV	0xbd

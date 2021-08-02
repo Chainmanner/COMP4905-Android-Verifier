@@ -19,7 +19,6 @@
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
-#include <sys/statfs.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
@@ -125,10 +124,8 @@ int main( int argc, char** argv )
 	// CMD_MNT_DEV and CMD_UMNT_DEV variables.
 	int devnameLen;
 	char devname[ARG_MAX_LEN];
-	struct statfs statfsbuf;
 	char devpath_by_name[sizeof(BLOCK_BY_NAME_PATH) + 1 + ARG_MAX_LEN];
-	char fstype[16];
-	char mountpath[sizeof(MOUNTPOINT_PREFIX) + ARG_MAX_LEN];
+	char mountpath[sizeof(MOUNTPOINT_PREFIX) + 1 + ARG_MAX_LEN];
 	// CMD_GET_FILE variables.
 	char filepath[ARG_MAX_LEN];
 	int filepathLen, fileFD;
@@ -164,40 +161,14 @@ int main( int argc, char** argv )
 					break;
 				}
 
-				// Get the block device to be mounted, then get its info to determine what type we're mounting.
-				// At least on my Moto G7 Play, only EXT4 and F2FS are used.
-				strncpy(devpath_by_name, BLOCK_BY_NAME_PATH, sizeof(BLOCK_BY_NAME_PATH));
-				strncpy(devpath_by_name + sizeof(BLOCK_BY_NAME_PATH), "/", 1);
-				strncpy(devpath_by_name + sizeof(BLOCK_BY_NAME_PATH) + 1, devname, devnameLen);
-				if ( statfs(devpath_by_name, &statfsbuf) == -1 )
-				{
-					ui->Print(" !! Failed to statfs %s: %s !!\n\n", devpath_by_name, strerror(errno));
-					WriteToHost(ERR_STATFS, 1);
-					break;
-				}
-				if ( statfsbuf.f_type == EXT4_SUPER_MAGIC )	// NOTE: f_type generally assumed to be unsigned int.
-				{
-					strncpy(fstype, "ext4", 16);
-					fstype[4] = '\0';
-				}
-				else if ( statfsbuf.f_type == F2FS_SUPER_MAGIC )
-				{
-					strncpy(fstype, "f2fs", 16);
-					fstype[4] = '\0';
-				}
-				else
-				{
-					ui->Print(" !! Device %s has unsupported filesystem %lu !!\n\n", devname, statfsbuf.f_type);
-					WriteToHost(ERR_UNKNOWN_FS, 1);
-					break;
-				}
+				ui->Print(" Mounting %s...\n\n", devname);
 
-				strncpy(mountpath, MOUNTPOINT_PREFIX, sizeof(MOUNTPOINT_PREFIX));
-				strncpy(mountpath + sizeof(MOUNTPOINT_PREFIX), "/", 1);
-				strncpy(mountpath + sizeof(MOUNTPOINT_PREFIX) + 1, devname, devnameLen);
+				// Get the path of the block device to be mounted, and the path at which to mount it.
+				snprintf(devpath_by_name, sizeof(devpath_by_name), "%s/%s", BLOCK_BY_NAME_PATH, devname);
+				snprintf(mountpath, sizeof(mountpath), "%s/%s", MOUNTPOINT_PREFIX, devname);
 
 				// Create the mountpoint directory, which is assumed not to exist.
-				if ( mkdir(mountpath, 0700) == -1 )
+				if ( mkdir(mountpath, 0700) < 0 )
 				{
 					ui->Print(" !! Error creating %s: %s !!\n\n", mountpath, strerror(errno));
 					WriteToHost(ERR_MKDIR, 1);
@@ -207,13 +178,17 @@ int main( int argc, char** argv )
 				// Now let's actually mount the block device to the directory.
 				// Read-only, access times not updated, no device files, and no program execution.
 				// SUID and SGID is also disabled, though with exec disabled, it's kind of redundant.
-				if ( mount(devpath_by_name, mountpath, fstype,
-					MS_RDONLY | MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, "") == -1 )
+				// NOTE: For non-encrypted partitions, Android uses EXT4. For encrypted partitions, it uses F2FS, but
+				//	 there's no point in checking encrypted user data.
+				if ( mount(devpath_by_name, mountpath, "ext4",
+					MS_RDONLY | MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, "") < 0 )
 				{
 					ui->Print(" !! Unable to mount %s: %s !!\n\n", devpath_by_name, strerror(errno));
 					WriteToHost(ERR_MOUNT, 1);
 					break;
 				}
+
+				WriteToHost(SUCCESS, 1);
 
 				break;
 			case CMD_UMNT_DEV:	// TODO: TEST THIS
@@ -233,13 +208,13 @@ int main( int argc, char** argv )
 					WriteToHost(ERR_DIR_CLIMBING, 1);
 					break;
 				}
+
+				ui->Print(" Unmounting %s...\n\n", devname);
 				
-				strncpy(mountpath, MOUNTPOINT_PREFIX, sizeof(MOUNTPOINT_PREFIX));
-				strncpy(mountpath + sizeof(MOUNTPOINT_PREFIX), "/", 1);
-				strncpy(mountpath + sizeof(MOUNTPOINT_PREFIX) + 1, devname, devnameLen);
+				snprintf(mountpath, sizeof(mountpath), "%s/%s", MOUNTPOINT_PREFIX, devname);
 
 				// Unmount the filesystem.
-				if ( umount(mountpath) == -1 )
+				if ( umount(mountpath) < 0 )
 				{
 					ui->Print(" !! Failed to unmount %s: %s !!\n\n", mountpath, strerror(errno));
 					WriteToHost(ERR_UMOUNT, 1);
@@ -247,12 +222,14 @@ int main( int argc, char** argv )
 				}
 
 				// Delete the mountpoint.
-				if ( rmdir(mountpath) == -1 )
+				if ( rmdir(mountpath) < 0 )
 				{
 					ui->Print(" !! Unable to delete old mountpoint %s: %s !!\n\n", mountpath, strerror(errno));
 					WriteToHost(ERR_RMDIR, 1);
 					break;
 				}
+
+				WriteToHost(SUCCESS, 1);
 
 				break;
 			case CMD_GET_FILE:	// TODO: TEST THIS
@@ -276,7 +253,7 @@ int main( int argc, char** argv )
 				// TODO: I should put the following into a separate function.
 
 				// Get the file metadata.
-				if ( lstat(filepath, &statbuf) == -1 )
+				if ( lstat(filepath, &statbuf) < 0 )
 				{
 					ui->Print(" !! Could not stat %s: %s !!\n\n", filepath, strerror(errno));
 					WriteToHost(ERR_STAT, 1);
