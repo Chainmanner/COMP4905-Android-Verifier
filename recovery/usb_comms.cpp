@@ -13,6 +13,8 @@
 
 #include <android-base/properties.h>
 
+#include "verifier_constants.h"
+
 
 // == DEFINITIONS ==
 
@@ -30,16 +32,16 @@
 
 
 // USB interface descriptor.
-// TODO: Is this right? I need to make sure this is right.
 struct usb_interface_descriptor verifier_interface = {
 	.bLength = USB_DT_INTERFACE_SIZE,
 	.bDescriptorType = USB_DT_INTERFACE,
-	.bInterfaceNumber = 0,
+	.bInterfaceNumber = INTERFACE_NUMBER,
 	.bNumEndpoints = 2,
 	// Class, subclass, and protocol needed in order to identify the verifier USB interface on the host's end.
-	.bInterfaceClass = 0xd7,
-	.bInterfaceSubClass = 0x9f,
-	.bInterfaceProtocol = 6,
+	// TODO: Do I need these? They're useful for finding the interface number and endpoint IDs, but the host already has them.
+	.bInterfaceClass = INTERFACE_CLASS,
+	.bInterfaceSubClass = INTERFACE_SUBCLASS,
+	.bInterfaceProtocol = INTERFACE_PROTOCOL,
 	.iInterface = 1,
 };
 
@@ -80,14 +82,14 @@ static const struct {
 		.sink = {
 			.bLength = sizeof(verifier_descriptors.fs_descs.sink),
 			.bDescriptorType = USB_DT_ENDPOINT,
-			.bEndpointAddress = 1 | USB_DIR_IN,
+			.bEndpointAddress = IN_ADDR,
 			.bmAttributes = USB_ENDPOINT_XFER_BULK,
 			.wMaxPacketSize = FS_MAX_PACKET_SIZE,
 		},
 		.source = {
 			.bLength = sizeof(verifier_descriptors.fs_descs.source),
 			.bDescriptorType = USB_DT_ENDPOINT,
-			.bEndpointAddress = 1 | USB_DIR_OUT,
+			.bEndpointAddress = OUT_ADDR,
 			.bmAttributes = USB_ENDPOINT_XFER_BULK,
 			.wMaxPacketSize = FS_MAX_PACKET_SIZE,
 		},
@@ -97,14 +99,14 @@ static const struct {
 		.sink = {
 			.bLength = sizeof(verifier_descriptors.hs_descs.sink),
 			.bDescriptorType = USB_DT_ENDPOINT,
-			.bEndpointAddress = 1 | USB_DIR_IN,
+			.bEndpointAddress = IN_ADDR,
 			.bmAttributes = USB_ENDPOINT_XFER_BULK,
 			.wMaxPacketSize = HS_MAX_PACKET_SIZE,
 		},
 		.source = {
 			.bLength = sizeof(verifier_descriptors.hs_descs.source),
 			.bDescriptorType = USB_DT_ENDPOINT,
-			.bEndpointAddress = 1 | USB_DIR_OUT,
+			.bEndpointAddress = OUT_ADDR,
 			.bmAttributes = USB_ENDPOINT_XFER_BULK,
 			.wMaxPacketSize = HS_MAX_PACKET_SIZE,
 		},
@@ -114,7 +116,7 @@ static const struct {
 		.sink = {
 			.bLength = sizeof(verifier_descriptors.ss_descs.sink),
 			.bDescriptorType = USB_DT_ENDPOINT,
-			.bEndpointAddress = 1 | USB_DIR_IN,
+			.bEndpointAddress = IN_ADDR,
 			.bmAttributes = USB_ENDPOINT_XFER_BULK,
 			.wMaxPacketSize = SS_MAX_PACKET_SIZE,
 		},
@@ -126,7 +128,7 @@ static const struct {
 		.source = {
 			.bLength = sizeof(verifier_descriptors.ss_descs.source),
 			.bDescriptorType = USB_DT_ENDPOINT,
-			.bEndpointAddress = 1 | USB_DIR_OUT,
+			.bEndpointAddress = OUT_ADDR,
 			.bmAttributes = USB_ENDPOINT_XFER_BULK,
 			.wMaxPacketSize = SS_MAX_PACKET_SIZE,
 		},
@@ -208,8 +210,8 @@ ssize_t ReadFromHost(void* inBuf, size_t iNumBytes)
 {
 	char* inBuf_curPtr = (char*)inBuf;	// Must be char*; void* arithmetic not allowed.
 	size_t bytesLeftToRead = iNumBytes;
-	size_t bytesReadTotal = 0;
-	size_t bytesRead;
+	ssize_t bytesReadTotal = 0;
+	ssize_t bytesRead;
 	size_t bytesToRead;
 
 	while ( bytesLeftToRead > 0 )
@@ -236,7 +238,7 @@ ssize_t WriteToHost(const void* outBuf, size_t iNumBytes)
 	char* outBuf_curPtr = (char*)outBuf;
 	size_t bytesLeftToWrite = iNumBytes;
 	ssize_t bytesWrittenTotal = 0;
-	size_t bytesWritten;
+	ssize_t bytesWritten;
 	size_t bytesToWrite;
 
 	while ( bytesLeftToWrite > 0 )

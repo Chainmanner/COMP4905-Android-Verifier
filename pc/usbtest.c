@@ -6,13 +6,13 @@
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <linux/usb/ch9.h>
+#include <linux/usbdevice_fs.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <string.h>
-#include <linux/usbdevice_fs.h>
-#include <linux/usb/ch9.h>
 
 #include "verifier_constants.h"
 
@@ -53,7 +53,7 @@ int main(int argc, char** argv)
 
 
 	// Find the device with vendor ID 0xE666 and product ID 0xE666.
-	// Not the safest or most elegant way of doing so, but for a test program, it works.
+	// Not the most elegant way of doing so (or the safest, considering I forwent size checks), but for a test program, it works.
 	dirPtr = opendir("/sys/bus/usb/devices");
 	if ( dirPtr == NULL )
 	{
@@ -178,11 +178,11 @@ int main(int argc, char** argv)
 	strncpy(filename, testRecv + 1, ARG_MAX_LEN);
 	struct file_metadata fmeta;
 	memcpy(&fmeta, testRecv + 1 + ARG_MAX_LEN, sizeof(struct file_metadata));
-	printf( "uid: %d\ngid: %d\nmode: %o\nsize: %ld\ncontext:%s\n", fmeta.uid, fmeta.gid, fmeta.mode, fmeta.fileSize,
+	printf( "uid: %d\ngid: %d\nmode: %o\nsize: %ld\ncontext: %s\n", fmeta.uid, fmeta.gid, fmeta.mode, fmeta.fileSize,
 		fmeta.selinuxContext);
-	int testWriteFD = open("./wow", O_WRONLY | O_CREAT);
+	/*int testWriteFD = open("./wow", O_WRONLY | O_CREAT);
 	write(testWriteFD, testRecv + 1 + ARG_MAX_LEN + sizeof(struct file_metadata), fmeta.fileSize);
-	close(testWriteFD);
+	close(testWriteFD);*/
 	
 	// Reboot the phone to the bootloader.
 	const char* shutdownCmd = "\x5d";

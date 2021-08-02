@@ -50,17 +50,17 @@
 #include "usb_comms.h"
 
 
-// GLOBALS
+// ==== GLOBALS ====
 
 RecoveryUI* ui = nullptr;
 
 
-// FUNCTIONS
+// ==== FUNCTIONS ====
 
 // TODO: Nothing here for now.
 
 
-// MAIN
+// ==== MAIN CODE ====
 
 int main( int argc, char** argv )
 {
@@ -273,6 +273,8 @@ int main( int argc, char** argv )
 					break;
 				}
 
+				// TODO: I should put the following into a separate function.
+
 				// Get the file metadata.
 				if ( lstat(filepath, &statbuf) == -1 )
 				{
@@ -291,10 +293,8 @@ int main( int argc, char** argv )
 				memset(responseMetadata, '\0', 1 + ARG_MAX_LEN + sizeof(struct file_metadata));
 				strncpy((char*)responseMetadata, FILE_METADATA, 1);
 				
-				// First, for the sake of request-response integrity, reply with the file path.
+				// First put the metadata: filename, mode, uid, gid, mode (perm + type), size, and SELinux context.
 				strncpy((char*)responseMetadata + 1, filepath, ARG_MAX_LEN-1);
-				
-				// Then, let's put the metadata: mode, uid, gid, mode (perm + type), size, and the SELinux context.
 				fm.uid = statbuf.st_uid;
 				fm.gid = statbuf.st_gid;
 				fm.mode = statbuf.st_mode;
