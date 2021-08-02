@@ -31,8 +31,6 @@
 #define ERR_NO_ARG		"\x0a"
 #define ERR_DIR_CLIMBING	"\xdc"
 #define ERR_STAT		"\x57"
-#define ERR_STATFS		"\x5f"
-#define ERR_UNKNOWN_FS		"\x0f"
 #define ERR_MKDIR		"\xdd"
 #define ERR_MOUNT		"\xb0"
 #define ERR_UMOUNT		"\x0b"
@@ -40,7 +38,6 @@
 #define ERR_FILE_TOO_BIG	"\x2b"
 #define ERR_OPEN		"\xf0"
 #define ERR_READ		"\xfe"
-#define ERR_READ_SIZE_MISMATCH	"\xf5"
 
 // Apparently the stat struct may differ across architectures, so to be safe, here's a definition with only the necessary types.
 struct file_metadata {

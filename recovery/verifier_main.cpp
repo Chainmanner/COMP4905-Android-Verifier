@@ -168,6 +168,7 @@ int main( int argc, char** argv )
 				snprintf(mountpath, sizeof(mountpath), "%s/%s", MOUNTPOINT_PREFIX, devname);
 
 				// Create the mountpoint directory, which is assumed not to exist.
+				// NOTE: No exception made for EEXIST. This directory should not have existed in the first place.
 				if ( mkdir(mountpath, 0700) < 0 )
 				{
 					ui->Print(" !! Error creating %s: %s !!\n\n", mountpath, strerror(errno));
@@ -184,6 +185,7 @@ int main( int argc, char** argv )
 					MS_RDONLY | MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, "") < 0 )
 				{
 					ui->Print(" !! Unable to mount %s: %s !!\n\n", devpath_by_name, strerror(errno));
+					rmdir(mountpath);
 					WriteToHost(ERR_MOUNT, 1);
 					break;
 				}
@@ -343,7 +345,7 @@ int main( int argc, char** argv )
 
 				break;
 			case CMD_SHUTDOWN:
-				ui->Print(" Rebooting to the bootloader in 5 seconds. Have a nice day!\n\n");
+				ui->Print("\n\n Rebooting to the bootloader in 5 seconds. Have a nice day!\n\n");
 				sleep(5);
 				android::base::SetProperty(ANDROID_RB_PROPERTY, "reboot,bootloader");
 				return EXIT_SUCCESS;

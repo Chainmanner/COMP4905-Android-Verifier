@@ -1,5 +1,5 @@
 // TODO: Add comments.
-// TODO: Implement cryptography.
+// TODO: Implement device-to-host encryption.
 
 #include <dirent.h>
 #include <errno.h>
@@ -32,7 +32,6 @@
 
 // Reads at most numBytes from the device into inBuf.
 // Returns the number of bytes read, or -1 if an error occurred (and also prints the error).
-// TODO: TEST THIS
 ssize_t ReadFromDevice(int descFD, int epInID, void* inBuf, size_t numBytes)
 {
 	char* inBuf_curPtr = (char*)inBuf;
@@ -68,7 +67,6 @@ ssize_t ReadFromDevice(int descFD, int epInID, void* inBuf, size_t numBytes)
 
 // Writes at most numBytes from outBuf to the device.
 // Returns the number of bytes written, or -1 if an error occurred (and also prints the error).
-// TODO: TEST THIS
 ssize_t WriteToDevice(int descFD, int epOutID, const void* outBuf, size_t numBytes)
 {
 	char* outBuf_curPtr = (char*)outBuf;
@@ -100,6 +98,116 @@ ssize_t WriteToDevice(int descFD, int epOutID, const void* outBuf, size_t numByt
 	}
 
 	return bytesWrittenTotal;
+}
+
+// Gets the string that corresponds to an error response byte.
+// Since you can't scroll through the device's log, this should be printed on the host's end in case the user misses something.
+const char* GetErrorString(char code)
+{
+	char code_str[2];
+	code_str[0] = code;
+	code_str[1] = '\0';
+
+	if ( !strncmp(code_str, ERR_NO_ARG, 1) )
+		return "No argument provided";
+	if ( !strncmp(code_str, ERR_DIR_CLIMBING, 1) )
+		return "Directory traversal detected";
+	if ( !strncmp(code_str, ERR_STAT, 1) )
+		return "stat(2) failed";
+	if ( !strncmp(code_str, ERR_MKDIR, 1) )
+		return "mkdir(2) failed";
+	if ( !strncmp(code_str, ERR_MOUNT, 1) )
+		return "mount(2) failed";
+	if ( !strncmp(code_str, ERR_UMOUNT, 1) )
+		return "umount(2) failed";
+	if ( !strncmp(code_str, ERR_RMDIR, 1) )
+		return "rmdir(2) failed";
+	if ( !strncmp(code_str, ERR_FILE_TOO_BIG, 1) )
+		return "Directory traversal detected";
+	if ( !strncmp(code_str, ERR_OPEN, 1) )
+		return "open(2) failed";
+	if ( !strncmp(code_str, ERR_READ, 1) )
+		return "read(2) failed";
+}
+
+// Mounts a partition on the device by name.
+// On success, the partition is mounted to /mnt/<part-name>, where <part-name> is the partition's name in /dev/block/by-name (or
+// whatever BLOCK_BY_NAME_PATH is set to), and returns 0.
+// On failure, returns -1.
+int MountPartition(int descFD, int epInID, int epOutID, const char* devname)
+{
+	char cmd[1 + ARG_MAX_LEN];
+	char response[2];
+	size_t devnameLen;
+
+	devnameLen = strnlen(devname, ARG_MAX_LEN-1);
+	if ( devnameLen == ARG_MAX_LEN-1 )
+	{
+		printf("!! Device name %s too long - aborting mount !!\n", devname);
+		return -1;
+	}
+	cmd[0] = CMD_MNT_DEV;
+	strncpy(cmd + 1, devname, devnameLen);
+	cmd[devnameLen + 1] = '\0';
+
+	if ( WriteToDevice(descFD, epOutID, cmd, 1 + devnameLen + 1) < 0 )
+		return -1;
+	if ( ReadFromDevice(descFD, epInID, response, 1) < 0 )
+		return -1;
+	response[1] = '\0';
+	if ( !strncmp(response, SUCCESS, 1) )
+	{
+		printf("-- Device %s mounted successfully to %s/%s --\n", devname, MOUNTPOINT_PREFIX, devname);
+		return 0;
+	}
+
+	printf("!! Error mounting %s: %s !!\n", devname, GetErrorString(response[0]));
+	return -1;
+}
+
+// Unmounts a partition on the device by name (same name as was used to mount it).
+// On success, partition is unmounted; old mountpoint is deleted; and this function returns 0.
+// On failure, -1 is returned.
+int UnmountPartition(int descFD, int epInID, int epOutID, const char* devname)
+{
+	char cmd[1 + ARG_MAX_LEN];
+	char response[2];
+	size_t devnameLen;
+	
+	devnameLen = strnlen(devname, ARG_MAX_LEN-1);
+	if ( devnameLen == ARG_MAX_LEN-1 )
+	{
+		printf("!! Device name %s too long - aborting unmount !!\n", devname);
+		return -1;
+	}
+	cmd[0] = CMD_UMNT_DEV;
+	strncpy(cmd + 1, devname, devnameLen);
+	cmd[devnameLen + 1] = '\0';
+	
+	if ( WriteToDevice(descFD, epOutID, cmd, 1 + devnameLen + 1) < 0 )
+		return -1;
+	if ( ReadFromDevice(descFD, epInID, response, 1) < 0 )
+		return -1;
+	response[1] = '\0';
+	if ( !strncmp(response, SUCCESS, 1) )
+	{
+		printf("-- Device %s unmounted --\n", devname);
+		return 0;
+	}
+
+	printf("!! Error unmounting %s: %s !!\n", devname, GetErrorString(response[0]));
+	return -1;
+}
+
+// Sends the signal to reboot the device to the bootloader.
+int RebootDevice(int descFD, int epOutID)
+{
+	char cmd[1];
+	cmd[0] = CMD_SHUTDOWN;
+	if ( WriteToDevice(descFD, epOutID, cmd, 1) < 0 )
+		return -1;
+	printf("-- Reboot-to-bootloader signal sent to device --\n");
+	return 0;
 }
 
 
@@ -238,7 +346,19 @@ int main(int argc, char** argv)
 		return -1;
 	}
 
-	// TODO
+	// FIXME: ==== TEST CODE ====
+
+	MountPartition(descFD, epInID, epOutID, "system_a");
+	MountPartition(descFD, epInID, epOutID, "system_b");
+	MountPartition(descFD, epInID, epOutID, "vendor_a");
+	MountPartition(descFD, epInID, epOutID, "vendor_b");
+	UnmountPartition(descFD, epInID, epOutID, "system_a");
+	UnmountPartition(descFD, epInID, epOutID, "system_b");
+	UnmountPartition(descFD, epInID, epOutID, "vendor_a");
+	UnmountPartition(descFD, epInID, epOutID, "vendor_b");
+	RebootDevice(descFD, epOutID);
+
+	// FIXME: ==== TEST CODE ENDS ====
 
 	close(descFD);
 	return 0;
