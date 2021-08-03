@@ -5,6 +5,7 @@
 // IMPORTS
 // TODO: Clean up unused imports.
 
+#include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -56,12 +57,148 @@ RecoveryUI* ui = nullptr;
 
 // ==== FUNCTIONS ====
 
-// TODO: Nothing here for now.
+// Gets a file by path and sends it to the host.
+// Doesn't return anything. If it fails, the host is responsible for retrying.
+void SendFileToHost(int filepathLen, const char* filepath)
+{
+	struct stat statbuf;
+	struct file_metadata fm;
+	ssize_t bytesRead, bytesToRead, bytesLeftToRead;
+	char* selinuxContext_temp = nullptr;
+	char responseMetadata[1 + ARG_MAX_LEN + sizeof(struct file_metadata)];
+	int fileFD;
+	char responseFileBlock[1 + FILE_TRANSFER_BLOCK_SIZE];
+	long bytesSent;
+	long i;
+
+	// Get the file metadata.
+	if ( lstat(filepath, &statbuf) < 0 )
+	{
+		ui->Print(" !! Could not stat %s: %s !!\n\n", filepath, strerror(errno));
+		WriteToHost(ERR_STAT, 1);
+		return;
+	}
+	if ( statbuf.st_size > MAX_FILE_SIZE )
+	{
+		ui->Print(" !! %s is too big (%ld bytes; limit is %ld bytes) !!\n\n", filepath,
+				statbuf.st_size, MAX_FILE_SIZE);
+		WriteToHost(ERR_FILE_TOO_BIG, 1);
+		return;
+	}
+
+	memset(responseMetadata, '\0', 1 + sizeof(struct file_metadata));
+	strncpy((char*)responseMetadata, FILE_METADATA, 1);
+	
+	// First put the metadata: filename, mode, uid, gid, mode (perm + type), size, and SELinux context.
+	fm.filepathLen = filepathLen;
+	strncpy(fm.filepath, filepath, filepathLen);
+	fm.uid = statbuf.st_uid;
+	fm.gid = statbuf.st_gid;
+	fm.mode = statbuf.st_mode;
+	fm.fileSize = (S_ISREG(statbuf.st_mode) ? statbuf.st_size : 0);
+	fm.contextLen = getfilecon(filepath, &selinuxContext_temp);
+	if ( fm.contextLen > SELINUX_CONTEXT_MAX_LEN - 1 )
+		fm.contextLen = SELINUX_CONTEXT_MAX_LEN - 1;
+	if ( fm.contextLen > 0 )
+	{
+		strncpy(fm.selinuxContext, selinuxContext_temp, fm.contextLen);
+		fm.selinuxContext[fm.contextLen] = '\0';
+	}
+	else
+		ui->Print(" ?? Failed to get SELinux context for %s: %s ??\n\n", filepath, strerror(errno));
+	memcpy((char*)responseMetadata + 1, &fm, sizeof(struct file_metadata));
+
+	// Send the metadata.
+	bytesSent = WriteToHost(responseMetadata, 1 + sizeof(struct file_metadata));
+	if ( bytesSent < 0 )
+		ui->Print(" !! Failed to send metadata of %s to the host: %s !!\n\n", filepath,
+				strerror(errno));
+	else
+		ui->Print(" Metadata of %s sent, sending contents... ", filepath);
+
+	// Now we send the whole file itself.
+	// Obviously not applicable in the case of directories or other non-regular files.
+	if ( S_ISREG(statbuf.st_mode) )
+	{
+		fileFD = open(filepath, O_RDONLY);
+		if ( fileFD < 0 )
+		{
+			ui->Print(" !! Failed to open %s: %s !!\n\n", filepath, strerror(errno));
+			WriteToHost(ERR_OPEN, 1);
+			return;
+		}
+		
+		// Read each block and send it.
+		// NOTE: Do NOT change the following without also changing it in the host code!
+		//	 You risk desynchronization if you don't.
+		responseFileBlock[0] = FILE_CONTENT[0];
+		bytesLeftToRead = statbuf.st_size;
+		for ( i = 0; i < statbuf.st_size; i += FILE_TRANSFER_BLOCK_SIZE )
+		{
+			//memcpy(responseFileBlock + 1, '\0', FILE_TRANSFER_BLOCK_SIZE);
+			bytesToRead = (bytesLeftToRead > FILE_TRANSFER_BLOCK_SIZE
+								? FILE_TRANSFER_BLOCK_SIZE
+								: bytesLeftToRead);
+			if ( bytesToRead == 0 )
+				break;
+			bytesRead = read(fileFD, responseFileBlock + 1, bytesToRead);
+			if ( bytesRead < 0 ) break;
+			bytesLeftToRead -= bytesRead;
+			bytesSent = WriteToHost(responseFileBlock, 1 + bytesRead);
+			if ( bytesSent < 0 ) break;
+		}
+		close(fileFD);
+		if ( bytesRead < 0 )
+		{
+			ui->Print(" !! Error while reading %s: %s !!\n\n", filepath, strerror(errno));
+			WriteToHost(ERR_READ, 1);
+			return;
+		}
+		else if ( bytesSent < 0 )
+		{
+			ui->Print("\n !! Failed to send %s to the host: %s !!\n\n", filepath, strerror(errno));
+			// Don't bother sending an error message; the failure could be because the EP closed.
+			return;
+		}
+	}
+	ui->Print(" done\n\n");
+	WriteToHost(SUCCESS, 1);
+}
+
+// Sends ALL entities under a directory, recursively for subdirectories.
+// Like with SendFileToHost(), doesn't return anything.
+void SendAllUnderDir(int dirpathLen, const char* dirpath)
+{
+	DIR* curDir;
+	dirent* curDirEnt;
+	size_t curDirEnt_nameLen;
+
+	curDir = opendir(dirpath);
+	curDirEnt = readdir(curDir);
+	while ( curDirEnt != NULL )
+	{
+		curDirEnt_nameLen = strnlen(curDirEnt->d_name, 255);
+
+		// Ignore the pointers to the current and parent directories.
+		if ( !strncmp(curDirEnt->d_name, "..", curDirEnt_nameLen) || !strncmp(curDirEnt->d_name, ".", curDirEnt_nameLen) )
+		{
+			curDirEnt = readdir(curDir);
+			continue;
+		}
+
+		// Send the current dirent to the host, and if it's a directory, recurse into it as well.
+		SendFileToHost(curDirEnt_nameLen, curDirEnt->d_name);
+		if ( curDirEnt->d_type == DT_DIR )
+			SendAllUnderDir(curDirEnt_nameLen, curDirEnt->d_name);
+
+		curDirEnt = readdir(curDir);
+	}
+}
 
 
 // ==== MAIN CODE ====
 
-int main( int argc, char** argv )
+int main(int argc, char** argv)
 {
 	// TODO: Anything other preliminary steps?
 
@@ -120,6 +257,7 @@ int main( int argc, char** argv )
 	// Device-side verifier loop. Receives and executes commands from the host.
 	// TODO: Comms have no encryption or verification. Implement that!
 	ui->Print(" Ready to receive commands...\n\n");
+	ssize_t bytesRead;
 	char recvMsg[1 + ARG_MAX_LEN];	// Includes the action to perform and the file to send (if applicable).
 	// CMD_MNT_DEV and CMD_UMNT_DEV variables.
 	int devnameLen;
@@ -128,22 +266,27 @@ int main( int argc, char** argv )
 	char mountpath[sizeof(MOUNTPOINT_PREFIX) + 1 + ARG_MAX_LEN];
 	// CMD_GET_FILE variables.
 	char filepath[ARG_MAX_LEN];
-	int filepathLen, fileFD;
-	struct stat statbuf;
-	struct file_metadata fm;
-	long bytesRead, bytesLeftToRead;
-	char* selinuxContext_temp = nullptr;
-	char responseMetadata[1 + ARG_MAX_LEN + sizeof(struct file_metadata)];
-	char responseFileBlock[1 + FILE_TRANSFER_BLOCK_SIZE];
-	long bytesSent;
-	long i;
+	int filepathLen;
+	// CMD_GET_ALL variables.
+	char dirpath[ARG_MAX_LEN];
+	int dirpathLen;
 	while (1)
 	{
 		memset(recvMsg, '\0', 1 + ARG_MAX_LEN);
-		ReadFromHost(recvMsg, 1 + ARG_MAX_LEN);
+		bytesRead = ReadFromHost(recvMsg, 1 + ARG_MAX_LEN);
+		if ( bytesRead < 0 )
+		{
+			ui->Print("!! Error while receiving a command: %s !!\n\n", strerror(errno));
+			ui->Print("!! Connection may be done for - REBOOTING TO BOOTLOADER !!\n\n");
+			sleep(5);
+			android::base::SetProperty(ANDROID_RB_PROPERTY, "reboot,bootloader");
+			return -1;
+		}
+		//ui->Print(" Command: %hhX | Arg: %s\n", recvMsg[0], recvMsg + 1);
 		switch ( recvMsg[0] )	// First byte indicates the action to undertake.
 		{
-			case CMD_MNT_DEV:	// TODO: TEST THIS
+			// Mounts a block device.
+			case CMD_MNT_DEV:
 				devnameLen = strnlen(recvMsg + 1, ARG_MAX_LEN-1);
 				if ( devnameLen == 0 )
 				{
@@ -193,7 +336,9 @@ int main( int argc, char** argv )
 				WriteToHost(SUCCESS, 1);
 
 				break;
-			case CMD_UMNT_DEV:	// TODO: TEST THIS
+
+			// Unmounts a block device.
+			case CMD_UMNT_DEV:
 				devnameLen = strnlen(recvMsg + 1, ARG_MAX_LEN-1);
 				if ( devnameLen == 0 )
 				{
@@ -234,7 +379,9 @@ int main( int argc, char** argv )
 				WriteToHost(SUCCESS, 1);
 
 				break;
-			case CMD_GET_FILE:	// TODO: TEST THIS
+
+			// Gets a file's metadata and data, and sends both to the host.
+			case CMD_GET_FILE:
 				filepathLen = strnlen(recvMsg + 1, ARG_MAX_LEN-1);
 				if ( filepathLen == 0 )
 				{
@@ -252,103 +399,40 @@ int main( int argc, char** argv )
 					break;
 				}
 
-				// TODO: I should put the following into a separate function.
-
-				// Get the file metadata.
-				if ( lstat(filepath, &statbuf) < 0 )
-				{
-					ui->Print(" !! Could not stat %s: %s !!\n\n", filepath, strerror(errno));
-					WriteToHost(ERR_STAT, 1);
-					break;
-				}
-				if ( statbuf.st_size > MAX_FILE_SIZE )
-				{
-					ui->Print(" !! %s is too big (%ld bytes; limit is %ld bytes) !!\n\n", filepath,
-							statbuf.st_size, MAX_FILE_SIZE);
-					WriteToHost(ERR_FILE_TOO_BIG, 1);
-					break;
-				}
-
-				memset(responseMetadata, '\0', 1 + ARG_MAX_LEN + sizeof(struct file_metadata));
-				strncpy((char*)responseMetadata, FILE_METADATA, 1);
-				
-				// First put the metadata: filename, mode, uid, gid, mode (perm + type), size, and SELinux context.
-				strncpy((char*)responseMetadata + 1, filepath, ARG_MAX_LEN-1);
-				fm.uid = statbuf.st_uid;
-				fm.gid = statbuf.st_gid;
-				fm.mode = statbuf.st_mode;
-				fm.fileSize = (S_ISREG(statbuf.st_mode) ? statbuf.st_size : 0);
-				fm.contextLen = getfilecon(filepath, &selinuxContext_temp);
-				if ( fm.contextLen > SELINUX_CONTEXT_MAX_LEN - 1 )
-					fm.contextLen = SELINUX_CONTEXT_MAX_LEN - 1;
-				if ( fm.contextLen > 0 )
-				{
-					strncpy(fm.selinuxContext, selinuxContext_temp, fm.contextLen);
-					fm.selinuxContext[fm.contextLen] = '\0';
-				}
-				else
-					ui->Print(" ?? Failed to get SELinux context for %s: %s ??\n\n", filepath, strerror(errno));
-				memcpy((char*)responseMetadata + 1 + ARG_MAX_LEN, &fm, sizeof(struct file_metadata));
-
-				// Send the metadata.
-				bytesSent = WriteToHost(responseMetadata, 1 + ARG_MAX_LEN + sizeof(struct file_metadata));
-				if ( bytesSent < 0 )
-					ui->Print(" !! Failed to send metadata of %s to the host: %s !!\n\n", filepath,
-							strerror(errno));
-				else
-					ui->Print(" Metadata of %s sent, sending contents... ", filepath);
-
-				// Now we send the whole file itself.
-				// Obviously not applicable in the case of directories or other non-regular files.
-				if ( S_ISREG(statbuf.st_mode) )
-				{
-					fileFD = open(filepath, O_RDONLY);
-					if ( fileFD < 0 )
-					{
-						ui->Print(" !! Failed to open %s: %s !!\n\n", filepath, strerror(errno));
-						WriteToHost(ERR_OPEN, 1);
-						break;
-					}
-					
-					// Read each block and send it.
-					strncpy(responseFileBlock, FILE_CONTENT, 1);
-					bytesLeftToRead = statbuf.st_size;
-					for ( i = 0; i < statbuf.st_size; i += FILE_TRANSFER_BLOCK_SIZE )
-					{
-						//memcpy(responseFileBlock + 1, '\0', FILE_TRANSFER_BLOCK_SIZE);
-						bytesRead = read(fileFD, responseFileBlock + 1,
-									(bytesLeftToRead > FILE_TRANSFER_BLOCK_SIZE
-											? FILE_TRANSFER_BLOCK_SIZE
-											: bytesLeftToRead));
-						if ( bytesRead < 0 ) break;
-						bytesLeftToRead -= bytesRead;
-						bytesSent = WriteToHost(responseFileBlock, 1 + bytesRead);
-						if ( bytesSent < 0 ) break;
-					}
-					close(fileFD);
-					if ( bytesRead < 0 )
-					{
-						ui->Print(" !! Error while reading %s: %s !!\n\n", filepath, strerror(errno));
-						WriteToHost(ERR_READ, 1);
-					}
-					else if ( bytesSent < 0 )
-					{
-						ui->Print("\n !! Failed to send %s to the host: %s !!\n\n", filepath, strerror(errno));
-						// Don't bother sending an error message; the failure could be because the EP closed.
-					}
-					else
-					{
-						ui->Print(" done\n\n");
-						WriteToHost(SUCCESS, 1);
-					}
-				}
+				SendFileToHost(filepathLen, filepath);
 
 				break;
+
+			case CMD_GET_ALL:	// TODO: TEST THIS
+				dirpathLen = strnlen(recvMsg + 1, ARG_MAX_LEN-1);
+				if ( dirpathLen == 0 )
+				{
+					ui->Print(" !! No directory provided !!\n\n");
+					WriteToHost(ERR_NO_ARG, 1);
+					break;
+				}
+				strncpy(dirpath, recvMsg + 1, dirpathLen);
+				dirpath[dirpathLen] = '\0';
+				// Disallow directory climbing - check everywhere for "../", and check for "/.." at the end.
+				if ( strstr(dirpath, "../") || (dirpathLen >= 3 && !strncmp(dirpath + dirpathLen - 3, "/..", 3)) )
+				{
+					ui->Print(" !! Directory climbing detected: %s !!\n\n", filepath);
+					WriteToHost(ERR_DIR_CLIMBING, 1);
+					break;
+				}
+
+				SendAllUnderDir(dirpathLen, dirpath);
+
+				break;
+
+			// Reboots the device to the bootloader.
 			case CMD_SHUTDOWN:
+				// TODO: Close the open file descriptors.
 				ui->Print("\n\n Rebooting to the bootloader in 5 seconds. Have a nice day!\n\n");
 				sleep(5);
 				android::base::SetProperty(ANDROID_RB_PROPERTY, "reboot,bootloader");
 				return EXIT_SUCCESS;
+
 			default:
 				ui->Print(" Unknown command %hhX followed by %s\n\n", recvMsg[0], recvMsg + 1);
 				break;

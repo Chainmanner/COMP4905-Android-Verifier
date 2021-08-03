@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <string.h>
 
@@ -23,9 +24,8 @@
 #define VERIFIER_VENDOR 0xE666
 #define VERIFIER_PRODUCT 0xE666
 
-// Some kernels have a limit to how much data can be transferred via USB.
-// According to system/core/fastboot/usb_linux.cpp in the Android source code, 16 KiB seems to be safe.
 #define USB_TRANSFER_LIMIT (16 * 1024)
+#define TIMEOUT 1000
 
 
 // ==== FUNCTIONS ====
@@ -47,7 +47,7 @@ ssize_t ReadFromDevice(int descFD, int epInID, void* inBuf, size_t numBytes)
 		bulk.ep = epInID;
 		bulk.len = bytesToRead;
 		bulk.data = inBuf_curPtr;
-		bulk.timeout = 0;
+		bulk.timeout = TIMEOUT;
 		bytesRead = ioctl(descFD, USBDEVFS_BULK, &bulk);
 		if ( bytesRead < 0 )
 		{
@@ -82,7 +82,7 @@ ssize_t WriteToDevice(int descFD, int epOutID, const void* outBuf, size_t numByt
 		bulk.ep = epOutID;
 		bulk.len = bytesToWrite;
 		bulk.data = outBuf_curPtr;
-		bulk.timeout = 0;
+		bulk.timeout = TIMEOUT;
 		bytesWritten = ioctl(descFD, USBDEVFS_BULK, &bulk);
 		if ( bytesWritten < 0 )
 		{
@@ -108,6 +108,7 @@ const char* GetErrorString(char code)
 	code_str[0] = code;
 	code_str[1] = '\0';
 
+	// TODO: Change these to directly compare the first character, e.g. code = ERR_NO_ARG[0].
 	if ( !strncmp(code_str, ERR_NO_ARG, 1) )
 		return "No argument provided";
 	if ( !strncmp(code_str, ERR_DIR_CLIMBING, 1) )
@@ -128,6 +129,12 @@ const char* GetErrorString(char code)
 		return "open(2) failed";
 	if ( !strncmp(code_str, ERR_READ, 1) )
 		return "read(2) failed";
+	if ( !strncmp(code_str, SUCCESS, 1) )
+		return "<success>";
+	if ( code == FILE_CONTENT[0] )
+		return "Transmission not yet done";
+
+	return "<string not available for this error code>";
 }
 
 // Mounts a partition on the device by name.
@@ -148,7 +155,7 @@ int MountPartition(int descFD, int epInID, int epOutID, const char* devname)
 	}
 	cmd[0] = CMD_MNT_DEV;
 	strncpy(cmd + 1, devname, devnameLen);
-	cmd[devnameLen + 1] = '\0';
+	cmd[1 + devnameLen] = '\0';
 
 	if ( WriteToDevice(descFD, epOutID, cmd, 1 + devnameLen + 1) < 0 )
 		return -1;
@@ -182,9 +189,9 @@ int UnmountPartition(int descFD, int epInID, int epOutID, const char* devname)
 	}
 	cmd[0] = CMD_UMNT_DEV;
 	strncpy(cmd + 1, devname, devnameLen);
-	cmd[devnameLen + 1] = '\0';
+	cmd[1 + devnameLen] = '\0';
 	
-	if ( WriteToDevice(descFD, epOutID, cmd, 1 + devnameLen + 1) < 0 )
+	if ( WriteToDevice(descFD, epOutID, cmd, 1 + devnameLen) < 0 )
 		return -1;
 	if ( ReadFromDevice(descFD, epInID, response, 1) < 0 )
 		return -1;
@@ -209,6 +216,98 @@ int RebootDevice(int descFD, int epOutID)
 	printf("-- Reboot-to-bootloader signal sent to device --\n");
 	return 0;
 }
+
+#if 1
+// Requests a file and saves its contents to disk as the data is received.
+// Returns 0 on success, -1 on failure.
+// NOTE: No use for this in the final project. But I'll keep it, just in case I'll need it again.
+int GetFileAndSave(int descFD, int epInID, int epOutID, const char* reqPath, const char* savePath, struct file_metadata* fm)
+{
+	char cmd[1 + ARG_MAX_LEN];
+	int reqPathLen;
+	char responseMetadata[1 + sizeof(struct file_metadata)];
+	char responseFileBlock[1 + FILE_TRANSFER_BLOCK_SIZE];
+	size_t fileSize;
+	int saveFileFD;
+	ssize_t bytesRead;
+	size_t bytesToRead;
+	size_t bytesLeftToRead;
+	size_t bytesReadTotal = 0;
+	size_t i;
+
+	cmd[0] = CMD_GET_FILE;
+	reqPathLen = strnlen(reqPath, ARG_MAX_LEN-1);
+	if ( reqPathLen == ARG_MAX_LEN-1 )
+	{
+		printf("!! Filename %s too long - aborting file request !!\n", reqPath);
+		return -1;
+	}
+	strncpy(cmd + 1, reqPath, reqPathLen);
+	cmd[1 + reqPathLen] = '\0';
+
+	// Send the command and get the file metadata.
+	if ( WriteToDevice(descFD, epOutID, cmd, 1 + reqPathLen) < 0 )
+		return -1;
+	if ( ReadFromDevice(descFD, epInID, responseMetadata, 1 + sizeof(struct file_metadata)) < 0 )
+		return -1;
+	if ( strncmp(responseMetadata, FILE_METADATA, 1) != 0 )
+	{
+		printf("!! Error receiving metadata for %s: %s !!\n", reqPath, GetErrorString(responseMetadata[0]));
+		return -1;
+	}
+	memcpy(fm, responseMetadata + 1, sizeof(struct file_metadata));
+
+	if ( S_ISREG(fm->mode) )
+	{
+		saveFileFD = open(savePath, O_WRONLY | O_CREAT, 0600);
+		if ( saveFileFD < 0 )
+		{
+			printf("!! Error opening %s for writing: %s !!\n", savePath, strerror(errno));
+			return -1;
+		}
+		
+		// We need to receive the bytes from the device EXACTLY as they are sent, or else we could get a deadlock.
+		// NOTE: Do NOT change the following without also changing it in the device code!
+		//	 You risk desynchronization if you don't.
+		fileSize = (size_t)fm->fileSize;
+		bytesLeftToRead = fileSize;
+		for ( i = 0; i < fileSize; i += FILE_TRANSFER_BLOCK_SIZE )
+		{
+			bytesToRead = (bytesLeftToRead > FILE_TRANSFER_BLOCK_SIZE ? FILE_TRANSFER_BLOCK_SIZE : bytesLeftToRead);
+			if ( bytesToRead == 0 )
+				break;
+			bytesRead = ReadFromDevice(descFD, epInID, responseFileBlock, 1 + bytesToRead);
+			if ( bytesRead < 0 ) break;
+			bytesLeftToRead -= bytesRead - 1;
+			bytesReadTotal += bytesRead - 1;
+			write(saveFileFD, responseFileBlock + 1, bytesToRead);
+		}
+		close(saveFileFD);
+		if ( bytesRead < 0 )	// Explanation for failure already provided by ReadFromDevice().
+			return -1;
+	}
+
+	if ( ReadFromDevice(descFD, epInID, responseFileBlock, 1) < 0 )	// Get the success message to confirm that we're done.
+		return -1;
+	if ( responseFileBlock[0] != SUCCESS[0] )
+	{
+		printf("!! Error receiving data for %s: %s !!\n", reqPath, GetErrorString(responseFileBlock[0]));
+		return -1;
+	}
+	if ( bytesReadTotal != fileSize )	// Should never happen, but let's try to detect premature termination.
+	{
+		printf("!! Mismatch between stated file size (%lu) and bytes received (%lu) !!\n", fileSize, bytesReadTotal);
+		return -1;
+	}
+
+	printf("-- Received file %s and saved it to disk as %s --\n", reqPath, savePath);
+	return 0;
+}
+#endif
+
+// TODO: Get a file and calculate its hash.
+
+// TODO: Get all files under a mountpoint.
 
 
 // ==== MAIN CODE ====
@@ -341,25 +440,32 @@ int main(int argc, char** argv)
 	epOutID = OUT_ADDR;
 	if ( ioctl(descFD, USBDEVFS_CLAIMINTERFACE, &ifID) < 0 )
 	{
-		printf("!! Unable to claim USB interface %d: %s --\n", ifID, strerror(errno));
+		printf("!! Unable to claim USB interface %d: %s !!\n", ifID, strerror(errno));
 		close(descFD);
 		return -1;
 	}
 
 	// FIXME: ==== TEST CODE ====
 
-	MountPartition(descFD, epInID, epOutID, "system_a");
+	struct file_metadata fm;
+	GetFileAndSave(descFD, epInID, epOutID, "/bin/recovery", "./wow", &fm);
+	GetFileAndSave(descFD, epInID, epOutID, "/init.rc", "./such", &fm);
+	GetFileAndSave(descFD, epInID, epOutID, "/init.rc", "./receive", &fm);
+
+	/*MountPartition(descFD, epInID, epOutID, "system_a");
 	MountPartition(descFD, epInID, epOutID, "system_b");
 	MountPartition(descFD, epInID, epOutID, "vendor_a");
 	MountPartition(descFD, epInID, epOutID, "vendor_b");
 	UnmountPartition(descFD, epInID, epOutID, "system_a");
 	UnmountPartition(descFD, epInID, epOutID, "system_b");
 	UnmountPartition(descFD, epInID, epOutID, "vendor_a");
-	UnmountPartition(descFD, epInID, epOutID, "vendor_b");
+	UnmountPartition(descFD, epInID, epOutID, "vendor_b");*/
 	RebootDevice(descFD, epOutID);
 
 	// FIXME: ==== TEST CODE ENDS ====
 
+	if ( ioctl(descFD, USBDEVFS_RELEASEINTERFACE, &ifID) < 0 )	// If this fails, continue anyway, but report the error.
+		printf("!! Unable to release USB interface %d: %s !!\n", ifID, strerror(errno));
 	close(descFD);
 	return 0;
 }

@@ -22,6 +22,7 @@
 #define CMD_MNT_DEV	0xbd
 #define CMD_UMNT_DEV	0x0d
 #define CMD_GET_FILE	0x9f
+#define CMD_GET_ALL	0xaf
 #define CMD_SHUTDOWN	0x5d
 
 // Responses
@@ -41,6 +42,8 @@
 
 // Apparently the stat struct may differ across architectures, so to be safe, here's a definition with only the necessary types.
 struct file_metadata {
+	size_t filepathLen;
+	char filepath[ARG_MAX_LEN];
 	uid_t	uid;
 	gid_t	gid;
 	mode_t	mode;
