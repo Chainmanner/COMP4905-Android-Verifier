@@ -4,6 +4,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <openssl/sha.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
@@ -25,7 +26,7 @@
 #define VERIFIER_PRODUCT 0xE666
 
 #define USB_TRANSFER_LIMIT (16 * 1024)
-#define TIMEOUT 1000
+#define TIMEOUT 0
 
 
 // ==== FUNCTIONS ====
@@ -217,7 +218,7 @@ int RebootDevice(int descFD, int epOutID)
 	return 0;
 }
 
-#if 1
+#if 0
 // Requests a file and saves its contents to disk as the data is received.
 // Returns 0 on success, -1 on failure.
 // NOTE: No use for this in the final project. But I'll keep it, just in case I'll need it again.
@@ -280,7 +281,7 @@ int GetFileAndSave(int descFD, int epInID, int epOutID, const char* reqPath, con
 			if ( bytesRead < 0 ) break;
 			bytesLeftToRead -= bytesRead - 1;
 			bytesReadTotal += bytesRead - 1;
-			write(saveFileFD, responseFileBlock + 1, bytesToRead);
+			write(saveFileFD, responseFileBlock + 1, bytesRead - 1);
 		}
 		close(saveFileFD);
 		if ( bytesRead < 0 )	// Explanation for failure already provided by ReadFromDevice().
@@ -305,9 +306,146 @@ int GetFileAndSave(int descFD, int epInID, int epOutID, const char* reqPath, con
 }
 #endif
 
-// TODO: Get a file and calculate its hash.
+// Receives a file's metadata from the device, and generates a SHA256 digest of its contents as they are received.
+// Returns 0 on success, -1 on failure, and 1 if a success response was received when file metadata was expected.
+// WARNING: digest MUST be at least 32 bytes long or else a buffer overflow will happen!
+int ReceiveFileMetaAndHash(int descFD, int epInID, struct file_metadata* fm, unsigned char* digest)
+{
+	char responseMetadata[1 + sizeof(struct file_metadata)];
+	char responseFileBlock[1 + FILE_TRANSFER_BLOCK_SIZE];
+	size_t fileSize;
+	ssize_t bytesRead;
+	size_t bytesToRead;
+	size_t bytesLeftToRead;
+	size_t bytesReadTotal = 0;
+	size_t i;
+	SHA256_CTX ctx;
 
-// TODO: Get all files under a mountpoint.
+	if ( ReadFromDevice(descFD, epInID, responseMetadata, 1 + sizeof(struct file_metadata)) < 0 )
+		return -1;
+
+	if ( responseMetadata[0] == SUCCESS[0] )
+		return 1;
+	else if ( responseMetadata[0] != FILE_METADATA[0] )
+	{
+		printf("!! Error receiving metadata: %s !!\n", GetErrorString(responseMetadata[0]));
+		return -1;
+	}
+	memcpy(fm, responseMetadata + 1, sizeof(struct file_metadata));
+
+	if ( S_ISREG(fm->mode) )
+	{
+		// We need to receive the bytes from the device EXACTLY as they are sent, or else we could get a deadlock.
+		// NOTE: Do NOT change the following without also changing it in the device code!
+		//	 You risk desynchronization if you don't.
+		fileSize = (size_t)fm->fileSize;
+		bytesLeftToRead = fileSize;
+		SHA256_Init(&ctx);
+		for ( i = 0; i < fileSize; i += FILE_TRANSFER_BLOCK_SIZE )
+		{
+			bytesToRead = (bytesLeftToRead > FILE_TRANSFER_BLOCK_SIZE ? FILE_TRANSFER_BLOCK_SIZE : bytesLeftToRead);
+			if ( bytesToRead == 0 )
+				break;
+			bytesRead = ReadFromDevice(descFD, epInID, responseFileBlock, 1 + bytesToRead);
+			if ( bytesRead < 0 ) break;
+			bytesLeftToRead -= bytesRead - 1;
+			bytesReadTotal += bytesRead - 1;
+			SHA256_Update(&ctx, responseFileBlock + 1, bytesRead - 1);
+		}
+		SHA256_Final(digest, &ctx);
+		if ( bytesRead < 0 )	// Explanation for failure already provided by ReadFromDevice().
+			return -1;
+	}
+
+	if ( ReadFromDevice(descFD, epInID, responseFileBlock, 1) < 0 )	// Get the success message to confirm that we're done.
+		return -1;
+	if ( responseFileBlock[0] != SUCCESS[0] )
+	{
+		printf("!! Error receiving data for %s: %s !!\n", fm->filepath, GetErrorString(responseFileBlock[0]));
+		return -1;
+	}
+	if ( S_ISREG(fm->mode) && bytesReadTotal != fileSize )	// Should never happen, but let's try to detect premature termination.
+	{
+		printf("!! Mismatch between stated file size (%lu) and bytes received (%lu) !!\n", fileSize, bytesReadTotal);
+		return -1;
+	}
+
+	return 0;
+}
+
+// Requests a file from the device, gets its metadata, and if it's a regular file, generates a SHA256 digest of its contents.
+// Not to be confused with ReceiveFileMetaAndHash(), which only handles reception. Returns 0 on success, -1 on failure.
+// WARNING: digest MUST be at least 32 bytes long or else a buffer overflow will happen!
+int GetFileMetaAndHash(int descFD, int epInID, int epOutID, const char* reqPath, struct file_metadata* fm, unsigned char* digest)
+{
+	char cmd[1 + ARG_MAX_LEN];
+	int reqPathLen;
+	int ret;
+	int i;
+
+	cmd[0] = CMD_GET_FILE;
+	reqPathLen = strnlen(reqPath, ARG_MAX_LEN-1);
+	if ( reqPathLen == ARG_MAX_LEN-1 )
+	{
+		printf("!! Filename %s too long - aborting file request !!\n", reqPath);
+		return -1;
+	}
+	strncpy(cmd + 1, reqPath, reqPathLen);
+	cmd[1 + reqPathLen] = '\0';
+
+	// Send the command and hand the reception off to ReceiveFileMetaAndHash().
+	if ( WriteToDevice(descFD, epOutID, cmd, 1 + reqPathLen) < 0 )
+		return -1;
+
+	ret = ReceiveFileMetaAndHash(descFD, epInID, fm, digest);
+	if ( ret == 0 )
+	{
+		printf("-- Received file %s having SHA256 digest ", reqPath);
+		for ( i = 0; i < 32; i++ ) printf("%02hhx", digest[i]);
+		printf(" --\n");
+	}
+	return ret;
+}
+
+// Gets the metadata and hashes of all files under a directory, as deep as necessary.
+// TODO: Also write the received file and metadata.
+// Returns 0 on success, -1 on failure.
+int GetAllFilesUnderDir(int descFD, int epInID, int epOutID, const char* reqPath)
+{
+	char cmd[1 + ARG_MAX_LEN];
+	int reqPathLen;
+	int ret;
+	struct file_metadata fm;
+	unsigned char digest[32];
+
+	cmd[0] = CMD_GET_ALL;
+	reqPathLen = strnlen(reqPath, ARG_MAX_LEN-1);
+	if ( reqPathLen == ARG_MAX_LEN-1 )
+	{
+		printf("!! Filename %s too long - aborting file request !!\n", reqPath);
+		return -1;
+	}
+	strncpy(cmd + 1, reqPath, reqPathLen);
+	cmd[1 + reqPathLen] = '\0';
+
+	if ( WriteToDevice(descFD, epOutID, cmd, 1 + reqPathLen) < 0 )
+		return -1;
+
+	do
+	{
+		ret = ReceiveFileMetaAndHash(descFD, epInID, &fm, digest);
+		// FIXME: == TEST CODE BEGINS ==
+		printf("file: %s (len = %lu)\n\tuid: %d\n\tgid: %d\n\tmode: %o\n\tcontext: %s\n\tsha256: ",
+			fm.filepath, fm.filepathLen, fm.uid, fm.gid, fm.mode, fm.selinuxContext);
+		for ( int i = 0; i < 32; i++ ) printf("%02hhx", digest[i]);
+		printf("\n");
+		memset(&fm, '\0', sizeof(struct file_metadata));
+		memset(digest, '\0', 32);
+		// FIXME: == TEST CODE ENDS ==
+	}
+	while ( ret == 0 );
+	return ret;
+}
 
 
 // ==== MAIN CODE ====
@@ -447,10 +585,15 @@ int main(int argc, char** argv)
 
 	// FIXME: ==== TEST CODE ====
 
-	struct file_metadata fm;
-	GetFileAndSave(descFD, epInID, epOutID, "/bin/recovery", "./wow", &fm);
-	GetFileAndSave(descFD, epInID, epOutID, "/init.rc", "./such", &fm);
-	GetFileAndSave(descFD, epInID, epOutID, "/init.rc", "./receive", &fm);
+	GetAllFilesUnderDir(descFD, epInID, epOutID, "/system");
+
+	/*struct file_metadata fm;
+	unsigned char digest1[32];
+	unsigned char digest2[32];
+	unsigned char digest3[32];
+	GetFileMetaAndHash(descFD, epInID, epOutID, "/bin/recovery", &fm, digest1);
+	GetFileMetaAndHash(descFD, epInID, epOutID, "/init.rc", &fm, digest2);
+	GetFileMetaAndHash(descFD, epInID, epOutID, "/init.rc", &fm, digest3);*/
 
 	/*MountPartition(descFD, epInID, epOutID, "system_a");
 	MountPartition(descFD, epInID, epOutID, "system_b");
@@ -460,6 +603,7 @@ int main(int argc, char** argv)
 	UnmountPartition(descFD, epInID, epOutID, "system_b");
 	UnmountPartition(descFD, epInID, epOutID, "vendor_a");
 	UnmountPartition(descFD, epInID, epOutID, "vendor_b");*/
+
 	RebootDevice(descFD, epOutID);
 
 	// FIXME: ==== TEST CODE ENDS ====

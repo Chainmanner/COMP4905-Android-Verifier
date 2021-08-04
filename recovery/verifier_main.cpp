@@ -1,6 +1,5 @@
 // TODO: Add a description about this file.
 // TODO: Need to add MitM protections, if possible.
-// TODO: Add capabilities to this process and drop root privileges, for extra security.
 
 // IMPORTS
 // TODO: Clean up unused imports.
@@ -42,12 +41,21 @@
 #include <cutils/sockets.h>
 #include <private/android_logger.h> /* private pmsg functions */
 
+#include <openssl/sha.h>
+
 #include "recovery_ui/device.h"
 #include "recovery_ui/stub_ui.h"
 #include "recovery_ui/ui.h"
 
 #include "verifier_constants.h"
 #include "usb_comms.h"
+
+
+// ==== PREPROCESSOR DEFS ====
+
+// Uncomment to produce output for each file sent, but at the cost of SEVERELY degraded performance.
+// Unless you're alright waiting half an hour for an operation that should take a few seconds at most, I recommend keeping this off.
+//#define VERBOSE
 
 
 // ==== GLOBALS ====
@@ -70,6 +78,10 @@ void SendFileToHost(int filepathLen, const char* filepath)
 	char responseFileBlock[1 + FILE_TRANSFER_BLOCK_SIZE];
 	long bytesSent;
 	long i;
+#ifdef VERBOSE
+	SHA256_CTX ctx;
+	unsigned char digest[32];
+#endif
 
 	// Get the file metadata.
 	if ( lstat(filepath, &statbuf) < 0 )
@@ -111,10 +123,19 @@ void SendFileToHost(int filepathLen, const char* filepath)
 	// Send the metadata.
 	bytesSent = WriteToHost(responseMetadata, 1 + sizeof(struct file_metadata));
 	if ( bytesSent < 0 )
+	{
 		ui->Print(" !! Failed to send metadata of %s to the host: %s !!\n\n", filepath,
 				strerror(errno));
-	else
-		ui->Print(" Metadata of %s sent, sending contents... ", filepath);
+		return;
+	}
+#ifdef VERBOSE
+	ui->Print(" File %s (%lu):\n", fm.filepath, fm.filepathLen);
+	ui->Print("     Size: %ld\n", fm.fileSize);
+	ui->Print("     UID: %d\n", fm.uid);
+	ui->Print("     GID: %d\n", fm.gid);
+	ui->Print("     Mode: %o\n", fm.mode);
+	ui->Print("     SELinux Context: %s (%lu)\n", fm.selinuxContext, fm.contextLen);
+#endif
 
 	// Now we send the whole file itself.
 	// Obviously not applicable in the case of directories or other non-regular files.
@@ -133,6 +154,9 @@ void SendFileToHost(int filepathLen, const char* filepath)
 		//	 You risk desynchronization if you don't.
 		responseFileBlock[0] = FILE_CONTENT[0];
 		bytesLeftToRead = statbuf.st_size;
+#ifdef VERBOSE
+		SHA256_Init(&ctx);
+#endif
 		for ( i = 0; i < statbuf.st_size; i += FILE_TRANSFER_BLOCK_SIZE )
 		{
 			//memcpy(responseFileBlock + 1, '\0', FILE_TRANSFER_BLOCK_SIZE);
@@ -146,6 +170,9 @@ void SendFileToHost(int filepathLen, const char* filepath)
 			bytesLeftToRead -= bytesRead;
 			bytesSent = WriteToHost(responseFileBlock, 1 + bytesRead);
 			if ( bytesSent < 0 ) break;
+#ifdef VERBOSE
+			SHA256_Update(&ctx, responseFileBlock + 1, bytesRead);
+#endif
 		}
 		close(fileFD);
 		if ( bytesRead < 0 )
@@ -160,18 +187,27 @@ void SendFileToHost(int filepathLen, const char* filepath)
 			// Don't bother sending an error message; the failure could be because the EP closed.
 			return;
 		}
+#ifdef VERBOSE
+		SHA256_Final(digest, &ctx);
+		ui->Print("     SHA256: ");
+		for ( i = 0; i < 32; i++ )
+			ui->Print("%02hhx", digest[i]);
+		ui->Print("\n\n");
+#endif
 	}
-	ui->Print(" done\n\n");
 	WriteToHost(SUCCESS, 1);
 }
 
 // Sends ALL entities under a directory, recursively for subdirectories.
-// Like with SendFileToHost(), doesn't return anything.
-void SendAllUnderDir(int dirpathLen, const char* dirpath)
+// Returns the number of files sent.
+int SendAllUnderDir(int dirpathLen, const char* dirpath)
 {
 	DIR* curDir;
 	dirent* curDirEnt;
 	size_t curDirEnt_nameLen;
+	char curPath[NAME_MAX];
+	size_t curPath_len;
+	int dirEntsSent = 0;
 
 	curDir = opendir(dirpath);
 	curDirEnt = readdir(curDir);
@@ -186,13 +222,21 @@ void SendAllUnderDir(int dirpathLen, const char* dirpath)
 			continue;
 		}
 
+		// Get the full path of this file.
+		snprintf(curPath, NAME_MAX, "%s/%s", dirpath, curDirEnt->d_name);
+		curPath_len = strnlen(curPath, NAME_MAX);
+
 		// Send the current dirent to the host, and if it's a directory, recurse into it as well.
-		SendFileToHost(curDirEnt_nameLen, curDirEnt->d_name);
+		SendFileToHost(curPath_len, curPath);
+		dirEntsSent++;
 		if ( curDirEnt->d_type == DT_DIR )
-			SendAllUnderDir(curDirEnt_nameLen, curDirEnt->d_name);
+			dirEntsSent += SendAllUnderDir(curPath_len, curPath);
 
 		curDirEnt = readdir(curDir);
 	}
+
+	// Since the function's recursive, don't send the SUCCESS byte here. Send it after the topmost function call is done.
+	return dirEntsSent;
 }
 
 
@@ -422,6 +466,7 @@ int main(int argc, char** argv)
 				}
 
 				SendAllUnderDir(dirpathLen, dirpath);
+				WriteToHost(SUCCESS, 1);	// Host is expecting a final success message to tell it to stop.
 
 				break;
 
