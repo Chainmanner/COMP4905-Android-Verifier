@@ -108,10 +108,10 @@ void SendFileToHost(int filepathLen, const char* filepath)
 	fm.gid = statbuf.st_gid;
 	fm.mode = statbuf.st_mode;
 	fm.fileSize = (S_ISREG(statbuf.st_mode) ? statbuf.st_size : 0);
-	fm.contextLen = getfilecon(filepath, &selinuxContext_temp);
-	if ( fm.contextLen > SELINUX_CONTEXT_MAX_LEN - 1 )
+	fm.contextLen = lgetfilecon(filepath, &selinuxContext_temp);
+	if ( (signed long)fm.contextLen > SELINUX_CONTEXT_MAX_LEN - 1 )
 		fm.contextLen = SELINUX_CONTEXT_MAX_LEN - 1;
-	if ( fm.contextLen > 0 )
+	if ( (signed long)fm.contextLen > 0 )
 	{
 		strncpy(fm.selinuxContext, selinuxContext_temp, fm.contextLen);
 		fm.selinuxContext[fm.contextLen] = '\0';
@@ -320,8 +320,8 @@ int main(int argc, char** argv)
 		bytesRead = ReadFromHost(recvMsg, 1 + ARG_MAX_LEN);
 		if ( bytesRead < 0 )
 		{
-			ui->Print("!! Error while receiving a command: %s !!\n\n", strerror(errno));
-			ui->Print("!! Connection may be done for - REBOOTING TO BOOTLOADER !!\n\n");
+			ui->Print(" !! Error while receiving a command: %s !!\n\n", strerror(errno));
+			ui->Print(" !! Connection may be done for - REBOOTING TO BOOTLOADER !!\n\n");
 			sleep(5);
 			android::base::SetProperty(ANDROID_RB_PROPERTY, "reboot,bootloader");
 			return -1;
@@ -447,7 +447,7 @@ int main(int argc, char** argv)
 
 				break;
 
-			case CMD_GET_ALL:	// TODO: TEST THIS
+			case CMD_GET_ALL:
 				dirpathLen = strnlen(recvMsg + 1, ARG_MAX_LEN-1);
 				if ( dirpathLen == 0 )
 				{
