@@ -405,7 +405,7 @@ int main(int argc, char** argv)
 				snprintf(mountpath, sizeof(mountpath), "%s/%s", MOUNTPOINT_PREFIX, devname);
 
 				// Unmount the filesystem.
-				if ( umount(mountpath) < 0 )
+				if ( umount2(mountpath, MNT_DETACH) < 0 )
 				{
 					ui->Print(" !! Failed to unmount %s: %s !!\n\n", mountpath, strerror(errno));
 					WriteToHost(ERR_UMOUNT, 1);
@@ -447,6 +447,7 @@ int main(int argc, char** argv)
 
 				break;
 
+			// Gets all files under a directory.
 			case CMD_GET_ALL:
 				dirpathLen = strnlen(recvMsg + 1, ARG_MAX_LEN-1);
 				if ( dirpathLen == 0 )
@@ -465,6 +466,7 @@ int main(int argc, char** argv)
 					break;
 				}
 
+				ui->Print(" Sending everything under %s...\n\n", dirpath);
 				SendAllUnderDir(dirpathLen, dirpath);
 				WriteToHost(SUCCESS, 1);	// Host is expecting a final success message to tell it to stop.
 

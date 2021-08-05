@@ -4,16 +4,20 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <openssl/sha.h>
 #include <stdio.h>
+#include <readline/readline.h>
+#include <readline/history.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <string.h>
 
 #include <linux/usbdevice_fs.h>
 #include <linux/usb/ch9.h>
+
+#include <openssl/sha.h>
 
 #include "verifier_constants.h"
 
@@ -27,6 +31,14 @@
 
 #define USB_TRANSFER_LIMIT (16 * 1024)
 #define TIMEOUT 0
+
+#define NUM_PARTITIONS 4
+const char* partitions_to_check[] = {	// NOTE: Filesystems of the provided partitions MUST be EXT4.
+	"system_a",
+	"system_b",
+	"vendor_a",
+	"vendor_b",
+};
 
 
 // ==== FUNCTIONS ====
@@ -333,6 +345,7 @@ int ReceiveFileMetaAndHash(int descFD, int epInID, struct file_metadata* fm, uns
 	}
 	memcpy(fm, responseMetadata + 1, sizeof(struct file_metadata));
 
+	memset(digest, '\0', 32);
 	if ( S_ISREG(fm->mode) )
 	{
 		// We need to receive the bytes from the device EXACTLY as they are sent, or else we could get a deadlock.
@@ -381,7 +394,7 @@ int GetFileMetaAndHash(int descFD, int epInID, int epOutID, const char* reqPath,
 	char cmd[1 + ARG_MAX_LEN];
 	int reqPathLen;
 	int ret;
-	int i;
+	//int i;
 
 	cmd[0] = CMD_GET_FILE;
 	reqPathLen = strnlen(reqPath, ARG_MAX_LEN-1);
@@ -398,19 +411,19 @@ int GetFileMetaAndHash(int descFD, int epInID, int epOutID, const char* reqPath,
 		return -1;
 
 	ret = ReceiveFileMetaAndHash(descFD, epInID, fm, digest);
-	if ( ret == 0 )
+	/*if ( ret == 0 )
 	{
 		printf("-- Received file %s having SHA256 digest ", reqPath);
 		for ( i = 0; i < 32; i++ ) printf("%02hhx", digest[i]);
 		printf(" --\n");
-	}
+	}*/
 	return ret;
 }
 
 // Gets the metadata and hashes of all files under a directory, as deep as necessary.
-// TODO: Also write the received file and metadata.
+// If saveFileFD is not -1, then this function also writes to the file pointed to by saveFileFD.
 // Returns 0 on success, -1 on failure.
-int GetAllFilesUnderDir(int descFD, int epInID, int epOutID, const char* reqPath)
+int GetAllFilesUnderDir(int descFD, int epInID, int epOutID, const char* reqPath, int saveFileFD)
 {
 	char cmd[1 + ARG_MAX_LEN];
 	int reqPathLen;
@@ -431,19 +444,21 @@ int GetAllFilesUnderDir(int descFD, int epInID, int epOutID, const char* reqPath
 	if ( WriteToDevice(descFD, epOutID, cmd, 1 + reqPathLen) < 0 )
 		return -1;
 
-	do
+	while (1)
 	{
 		ret = ReceiveFileMetaAndHash(descFD, epInID, &fm, digest);
-		// FIXME: == TEST CODE BEGINS ==
-		printf("file: %s (len = %lu)\n\tuid: %d\n\tgid: %d\n\tmode: %o\n\tcontext: %s\n\tsha256: ",
-			fm.filepath, fm.filepathLen, fm.uid, fm.gid, fm.mode, fm.selinuxContext);
-		for ( int i = 0; i < 32; i++ ) printf("%02hhx", digest[i]);
-		printf("\n");
-		memset(&fm, '\0', sizeof(struct file_metadata));
-		memset(digest, '\0', 32);
-		// FIXME: == TEST CODE ENDS ==
+		if ( ret != 0 )
+			break;
+		if ( saveFileFD >= 0 )
+		{
+			if ( write(saveFileFD, &fm, sizeof(struct file_metadata)) < 0
+				|| write(saveFileFD, digest, 32) < 0 )
+			{
+				printf("!! Error writing metadata for files under %s: %s !!\n", reqPath, strerror(errno));
+				return -1;
+			}
+		}
 	}
-	while ( ret == 0 );
 	return ret;
 }
 
@@ -454,7 +469,7 @@ int main(int argc, char** argv)
 {
 	// == VARIABLES ==
 
-	int i;
+	unsigned int i, j, k;
 
 	ssize_t bytesRead;
 	DIR* dirPtr;
@@ -471,9 +486,21 @@ int main(int argc, char** argv)
 	char devPath[64];
 
 	int descFD;
-	//char desc[1024];
 	int ifID, epInID, epOutID;
-	// TODO: Add more function-specific variables as is necessary.
+
+	char curMetadataFile[NAME_MAX];
+	int metadataFileFD;
+	const char* metadataFileAddr;
+	struct stat statbuf;
+	int ret;
+	unsigned int numRecords;
+	char curFileRequest[ARG_MAX_LEN];
+	struct file_metadata fm;
+	const struct file_metadata* fm_trusted;
+	unsigned char digest[32];
+	const unsigned char* digest_trusted;
+	int bDataMismatch;
+	int numMismatchedFiles;
 
 	// == CODE ==
 
@@ -568,7 +595,6 @@ int main(int argc, char** argv)
 		printf("!! DO NOT TAKE THE EASY ROUTE AND RUN THIS PROGRAM AS ROOT) !!\n");
 		return -1;
 	}
-	//descSize = read(descFD, desc, sizeof(desc));
 	printf("-- Opened %s for reading/writing --\n", devPath);
 
 	// We already know the USB interface ID, input endpoint ID, and output endpoint ID. They're defined in verifier_constants.h.
@@ -583,31 +609,155 @@ int main(int argc, char** argv)
 		return -1;
 	}
 
-	// FIXME: ==== TEST CODE ====
+	// == VERIFICATION ==
 
-	GetAllFilesUnderDir(descFD, epInID, epOutID, "/system");
+	for ( i = 0; i < NUM_PARTITIONS; i++ )
+	{
+		printf("\n==== %s ====\n", partitions_to_check[i]);
 
-	/*struct file_metadata fm;
-	unsigned char digest1[32];
-	unsigned char digest2[32];
-	unsigned char digest3[32];
-	GetFileMetaAndHash(descFD, epInID, epOutID, "/bin/recovery", &fm, digest1);
-	GetFileMetaAndHash(descFD, epInID, epOutID, "/init.rc", &fm, digest2);
-	GetFileMetaAndHash(descFD, epInID, epOutID, "/init.rc", &fm, digest3);*/
+		snprintf(curMetadataFile, NAME_MAX, "./metadata_%s.dat", partitions_to_check[i]);
+		ret = stat(curMetadataFile, &statbuf);
+		if ( ret < 0 )
+		{
+			if ( errno == ENOENT )
+			{
+				printf("-- Trusted metadata file %s not present; creating and populating it... --\n", curMetadataFile);
+				printf("-- WARNING: It is strongly recommended that you do this no later than after a fresh Android ");
+				printf("installation --\n");
 
-	/*MountPartition(descFD, epInID, epOutID, "system_a");
-	MountPartition(descFD, epInID, epOutID, "system_b");
-	MountPartition(descFD, epInID, epOutID, "vendor_a");
-	MountPartition(descFD, epInID, epOutID, "vendor_b");
-	UnmountPartition(descFD, epInID, epOutID, "system_a");
-	UnmountPartition(descFD, epInID, epOutID, "system_b");
-	UnmountPartition(descFD, epInID, epOutID, "vendor_a");
-	UnmountPartition(descFD, epInID, epOutID, "vendor_b");*/
+				metadataFileFD = open(curMetadataFile, O_WRONLY | O_CREAT, 0600);
+				if ( metadataFileFD < 0 )
+				{
+					printf("!! Couldn't create file %s: %s !!\n", curMetadataFile, strerror(errno));
+					continue;
+				}
 
+				// Get the metadata and SHA256 of each file in this partition, after mounting it, from the device.
+				if ( MountPartition(descFD, epInID, epOutID, partitions_to_check[i]) < 0 )
+					continue;
+				snprintf(curFileRequest, ARG_MAX_LEN, "%s/%s", MOUNTPOINT_PREFIX, partitions_to_check[i]);
+				if ( GetAllFilesUnderDir(descFD, epInID, epOutID, curFileRequest, metadataFileFD) < 0 )
+				{
+					close(metadataFileFD);
+					UnmountPartition(descFD, epInID, epOutID, partitions_to_check[i]);
+					unlink(curMetadataFile);
+					continue;
+				}
+
+				close(metadataFileFD);
+				UnmountPartition(descFD, epInID, epOutID, partitions_to_check[i]);
+			}
+			else
+			{
+				printf("!! Skipping %s due to stat error: %s !!\n", curMetadataFile, strerror(errno));
+			}
+
+			continue;
+		}
+
+		// Get the number of records in the file. Fail if the file size isn't evenly divisible by the record size.
+		if ( (size_t)statbuf.st_size % (sizeof(struct file_metadata) + 32) != 0 )
+		{
+			printf("!! Size of %s (%ld) not divisible by %lu !!\n", curMetadataFile, statbuf.st_size,
+				sizeof(struct file_metadata) + 32);
+			continue;
+		}
+		numRecords = (unsigned int)((size_t)statbuf.st_size / (sizeof(struct file_metadata) + 32));
+
+		// File full of metadata exists; verify the device's contents.
+		if ( MountPartition(descFD, epInID, epOutID, partitions_to_check[i]) < 0 )
+			continue;
+		printf("-- Verifying contents of %s... --\n", partitions_to_check[i]);
+
+		metadataFileFD = open(curMetadataFile, O_RDONLY);
+		if ( metadataFileFD < 0 )
+		{
+			printf("!! Couldn't open %s for reading: %s !!\n", curMetadataFile, strerror(errno));
+			continue;
+		}
+
+		// File could be megabytes large, so let's memory-map it.
+		metadataFileAddr = mmap(NULL, (size_t)statbuf.st_size, PROT_READ, MAP_PRIVATE, metadataFileFD, 0);
+		if ( metadataFileAddr == MAP_FAILED )
+		{
+			printf("!! Unable to memory-map %s: %s !!\n", curMetadataFile, strerror(errno));
+			close(metadataFileFD);
+			continue;
+		}
+
+		numMismatchedFiles = 0;
+		for ( j = 0; j < numRecords; j++ )
+		{
+			fm_trusted = metadataFileAddr + j * (sizeof(struct file_metadata) + 32);
+			digest_trusted = metadataFileAddr + j * (sizeof(struct file_metadata) + 32) + sizeof(struct file_metadata);
+
+			strncpy(curFileRequest, fm_trusted->filepath, fm_trusted->filepathLen);
+			memset(digest, '\0', 32);
+			curFileRequest[fm_trusted->filepathLen] = '\0';
+			if ( GetFileMetaAndHash(descFD, epInID, epOutID, curFileRequest, &fm, digest) < 0 )
+			{
+				// Let's call it a mismatch. File could have been deleted, or God knows what else could have happened.
+				printf("!! Failed to verify %s; considering it a mismatch and continuing on !!\n", curFileRequest);
+				numMismatchedFiles++;
+				continue;
+			}
+
+			// First compare file metadata.
+			bDataMismatch = 0;
+			if ( fm_trusted->uid != fm.uid )
+			{
+				printf("!! %s: UID MISMATCH (stored: %d, received: %d) !!\n", curFileRequest,
+					fm_trusted->uid, fm.uid);
+				bDataMismatch = 1;
+			}
+			if ( fm_trusted->gid != fm.gid )
+			{
+				printf("!! %s: GID MISMATCH (stored: %d, received: %d) !!\n", curFileRequest,
+					fm_trusted->gid, fm.gid);
+				bDataMismatch = 1;
+			}
+			if ( fm_trusted->mode != fm.mode )
+			{
+				printf("!! %s: MODE MISMATCH (stored: %o, received: %o) !!\n", curFileRequest,
+					fm_trusted->mode, fm.mode);
+				bDataMismatch = 1;
+			}
+			if ( fm_trusted->contextLen != fm.contextLen
+				|| strncmp(fm_trusted->selinuxContext, fm.selinuxContext, fm_trusted->contextLen) != 0 )
+			{
+				printf("!! %s: SELINUX CONTEXT MISMATCH (stored: %s, received: %s) !!\n", curFileRequest,
+					fm_trusted->selinuxContext, fm.selinuxContext);
+				bDataMismatch = 1;
+			}
+			// Now, compare the file hashes.
+			if ( memcmp(digest_trusted, digest, 32) != 0 )
+			{
+				printf("!! %s: CONTENTS CHANGED !!\n", curFileRequest);
+				printf("!!\tstored SHA256 hash: ");
+				for ( k = 0; k < 32; k++ )
+					printf("%02hhx", digest_trusted[k]);
+				printf("\t!!\n");
+				printf("!!\treceived SHA256 hash: ");
+				for ( k = 0; k < 32; k++ )
+					printf("%02hhx", digest[k]);
+				printf("\t!!\n");
+				bDataMismatch = 1;
+			}
+			numMismatchedFiles += bDataMismatch;
+		}
+		printf("-- Finished verifying %s --\n", partitions_to_check[i]);
+		printf("-- Number of mismatched files: %d --\n", numMismatchedFiles);
+
+		UnmountPartition(descFD, epInID, epOutID, partitions_to_check[i]);
+		munmap((char*)metadataFileAddr, (size_t)statbuf.st_size);
+		close(metadataFileFD);
+	}
+
+	// == CLEANUP ==
+
+	printf("\n");
+	free(readline("-- Press ENTER to reboot device and exit --\n"));
 	RebootDevice(descFD, epOutID);
-
-	// FIXME: ==== TEST CODE ENDS ====
-
 	if ( ioctl(descFD, USBDEVFS_RELEASEINTERFACE, &ifID) < 0 )	// If this fails, continue anyway, but report the error.
 		printf("!! Unable to release USB interface %d: %s !!\n", ifID, strerror(errno));
 	close(descFD);
