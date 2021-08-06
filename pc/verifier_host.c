@@ -342,6 +342,7 @@ int GetFileMetaAndHash(int descFD, int epInID, int epOutID, const char* reqPath,
 }
 
 // Gets the metadata and hashes of all files under a directory, as deep as necessary.
+// Also gets the directory under which all files are being checked.
 // If saveFileFD is not -1, then this function also writes to the file pointed to by saveFileFD.
 // Returns 0 on success, -1 on failure.
 int GetAllFilesUnderDir(int descFD, int epInID, int epOutID, const char* reqPath, int saveFileFD)
@@ -645,6 +646,13 @@ int main(int argc, char** argv)
 			{
 				printf("!! %s: MODE MISMATCH (stored: %o, received: %o) !!\n", curFileRequest,
 					fm_trusted->mode, fm.mode);
+				bDataMismatch = 1;
+			}
+			if ( S_ISDIR(fm.mode) && fm_trusted->fileSize != fm.fileSize )
+			{
+				// NOTE: Can't detect WHICH files in the directory are new/gone, only that at least one of them are.
+				printf("!! %s: MISMATCH IN NUMBER OF DIRECTORY ENTITIES (stored: %zu, received: %zu) !!\n",
+					curFileRequest, fm_trusted->fileSize, fm.fileSize);
 				bDataMismatch = 1;
 			}
 			if ( fm_trusted->contextLen != fm.contextLen

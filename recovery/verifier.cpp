@@ -76,6 +76,8 @@ void SendFileToHost(int filepathLen, const char* filepath, bool followSymlinks)
 	ssize_t bytesRead, bytesToRead, bytesLeftToRead;
 	char* selinuxContext_temp = nullptr;
 	uint64_t blockDevSize_temp;
+	DIR* curDirPtr;
+	int numItems;
 	char responseMetadata[1 + ARG_MAX_LEN + sizeof(struct file_metadata)];
 	int fileFD = -1;
 	char responseFileBlock[1 + FILE_TRANSFER_BLOCK_SIZE];
@@ -133,8 +135,19 @@ void SendFileToHost(int filepathLen, const char* filepath, bool followSymlinks)
 		// FIXME: What if size_t isn't an unsigned long?
 		fm.fileSize = blockDevSize_temp;
 	}
+	else if ( S_ISDIR(statbuf.st_mode) )	// For directories, the size is the number of elements. Need to detect added files too.
+	{
+		curDirPtr = opendir(fm.filepath);
+		numItems = 0;
+		while ( readdir(curDirPtr) != NULL )
+			numItems++;
+		closedir(curDirPtr);
+		fm.fileSize = numItems;
+	}
+	else if ( S_ISREG(statbuf.st_mode) )
+		fm.fileSize = statbuf.st_size;
 	else
-		fm.fileSize = (S_ISREG(statbuf.st_mode) ? statbuf.st_size : 0);
+		fm.fileSize = 0;
 	fm.contextLen = followSymlinks
 				? getfilecon(filepath, &selinuxContext_temp)
 				: lgetfilecon(filepath, &selinuxContext_temp);
@@ -231,6 +244,7 @@ void SendFileToHost(int filepathLen, const char* filepath, bool followSymlinks)
 }
 
 // Sends ALL entities under a directory, recursively for subdirectories.
+// This includes the directory specified by dirpath itself.
 // Returns the number of files sent.
 int SendAllUnderDir(int dirpathLen, const char* dirpath)
 {
@@ -240,6 +254,9 @@ int SendAllUnderDir(int dirpathLen, const char* dirpath)
 	char curPath[NAME_MAX];
 	size_t curPath_len;
 	int dirEntsSent = 0;
+
+	// Send the directory itself, to detect if any new files have been added.
+	SendFileToHost(dirpathLen, dirpath, false);
 
 	curDir = opendir(dirpath);
 	curDirEnt = readdir(curDir);
