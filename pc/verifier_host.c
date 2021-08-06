@@ -40,6 +40,12 @@ const char* partitions_to_check[] = {	// NOTE: Filesystems of the provided parti
 	"vendor_b",
 };
 
+#define NUM_NONFS_PARTITIONS 2
+const char* nonfs_partitions_to_check[] = {	// These partitions don't have an EXT4 filesystem, so we check them in their entirety.
+	"boot_a",
+	"boot_b",
+};
+
 
 // ==== FUNCTIONS ====
 
@@ -128,6 +134,8 @@ const char* GetErrorString(char code)
 		return "Directory traversal detected";
 	if ( !strncmp(code_str, ERR_STAT, 1) )
 		return "stat(2) failed";
+	if ( code == ERR_IOCTL[0] )
+		return "ioctl(2) failed";
 	if ( !strncmp(code_str, ERR_MKDIR, 1) )
 		return "mkdir(2) failed";
 	if ( !strncmp(code_str, ERR_MOUNT, 1) )
@@ -230,94 +238,6 @@ int RebootDevice(int descFD, int epOutID)
 	return 0;
 }
 
-#if 0
-// Requests a file and saves its contents to disk as the data is received.
-// Returns 0 on success, -1 on failure.
-// NOTE: No use for this in the final project. But I'll keep it, just in case I'll need it again.
-int GetFileAndSave(int descFD, int epInID, int epOutID, const char* reqPath, const char* savePath, struct file_metadata* fm)
-{
-	char cmd[1 + ARG_MAX_LEN];
-	int reqPathLen;
-	char responseMetadata[1 + sizeof(struct file_metadata)];
-	char responseFileBlock[1 + FILE_TRANSFER_BLOCK_SIZE];
-	size_t fileSize;
-	int saveFileFD;
-	ssize_t bytesRead;
-	size_t bytesToRead;
-	size_t bytesLeftToRead;
-	size_t bytesReadTotal = 0;
-	size_t i;
-
-	cmd[0] = CMD_GET_FILE;
-	reqPathLen = strnlen(reqPath, ARG_MAX_LEN-1);
-	if ( reqPathLen == ARG_MAX_LEN-1 )
-	{
-		printf("!! Filename %s too long - aborting file request !!\n", reqPath);
-		return -1;
-	}
-	strncpy(cmd + 1, reqPath, reqPathLen);
-	cmd[1 + reqPathLen] = '\0';
-
-	// Send the command and get the file metadata.
-	if ( WriteToDevice(descFD, epOutID, cmd, 1 + reqPathLen) < 0 )
-		return -1;
-	if ( ReadFromDevice(descFD, epInID, responseMetadata, 1 + sizeof(struct file_metadata)) < 0 )
-		return -1;
-	if ( strncmp(responseMetadata, FILE_METADATA, 1) != 0 )
-	{
-		printf("!! Error receiving metadata for %s: %s !!\n", reqPath, GetErrorString(responseMetadata[0]));
-		return -1;
-	}
-	memcpy(fm, responseMetadata + 1, sizeof(struct file_metadata));
-
-	if ( S_ISREG(fm->mode) )
-	{
-		saveFileFD = open(savePath, O_WRONLY | O_CREAT, 0600);
-		if ( saveFileFD < 0 )
-		{
-			printf("!! Error opening %s for writing: %s !!\n", savePath, strerror(errno));
-			return -1;
-		}
-		
-		// We need to receive the bytes from the device EXACTLY as they are sent, or else we could get a deadlock.
-		// NOTE: Do NOT change the following without also changing it in the device code!
-		//	 You risk desynchronization if you don't.
-		fileSize = (size_t)fm->fileSize;
-		bytesLeftToRead = fileSize;
-		for ( i = 0; i < fileSize; i += FILE_TRANSFER_BLOCK_SIZE )
-		{
-			bytesToRead = (bytesLeftToRead > FILE_TRANSFER_BLOCK_SIZE ? FILE_TRANSFER_BLOCK_SIZE : bytesLeftToRead);
-			if ( bytesToRead == 0 )
-				break;
-			bytesRead = ReadFromDevice(descFD, epInID, responseFileBlock, 1 + bytesToRead);
-			if ( bytesRead < 0 ) break;
-			bytesLeftToRead -= bytesRead - 1;
-			bytesReadTotal += bytesRead - 1;
-			write(saveFileFD, responseFileBlock + 1, bytesRead - 1);
-		}
-		close(saveFileFD);
-		if ( bytesRead < 0 )	// Explanation for failure already provided by ReadFromDevice().
-			return -1;
-	}
-
-	if ( ReadFromDevice(descFD, epInID, responseFileBlock, 1) < 0 )	// Get the success message to confirm that we're done.
-		return -1;
-	if ( responseFileBlock[0] != SUCCESS[0] )
-	{
-		printf("!! Error receiving data for %s: %s !!\n", reqPath, GetErrorString(responseFileBlock[0]));
-		return -1;
-	}
-	if ( bytesReadTotal != fileSize )	// Should never happen, but let's try to detect premature termination.
-	{
-		printf("!! Mismatch between stated file size (%lu) and bytes received (%lu) !!\n", fileSize, bytesReadTotal);
-		return -1;
-	}
-
-	printf("-- Received file %s and saved it to disk as %s --\n", reqPath, savePath);
-	return 0;
-}
-#endif
-
 // Receives a file's metadata from the device, and generates a SHA256 digest of its contents as they are received.
 // Returns 0 on success, -1 on failure, and 1 if a success response was received when file metadata was expected.
 // WARNING: digest MUST be at least 32 bytes long or else a buffer overflow will happen!
@@ -346,7 +266,7 @@ int ReceiveFileMetaAndHash(int descFD, int epInID, struct file_metadata* fm, uns
 	memcpy(fm, responseMetadata + 1, sizeof(struct file_metadata));
 
 	memset(digest, '\0', 32);
-	if ( S_ISREG(fm->mode) )
+	if ( S_ISREG(fm->mode) || S_ISBLK(fm->mode) )
 	{
 		// We need to receive the bytes from the device EXACTLY as they are sent, or else we could get a deadlock.
 		// NOTE: Do NOT change the following without also changing it in the device code!
@@ -389,14 +309,15 @@ int ReceiveFileMetaAndHash(int descFD, int epInID, struct file_metadata* fm, uns
 // Requests a file from the device, gets its metadata, and if it's a regular file, generates a SHA256 digest of its contents.
 // Not to be confused with ReceiveFileMetaAndHash(), which only handles reception. Returns 0 on success, -1 on failure.
 // WARNING: digest MUST be at least 32 bytes long or else a buffer overflow will happen!
-int GetFileMetaAndHash(int descFD, int epInID, int epOutID, const char* reqPath, struct file_metadata* fm, unsigned char* digest)
+int GetFileMetaAndHash(int descFD, int epInID, int epOutID, const char* reqPath, int followSymlinks, struct file_metadata* fm,
+	unsigned char* digest)
 {
 	char cmd[1 + ARG_MAX_LEN];
 	int reqPathLen;
 	int ret;
 	//int i;
 
-	cmd[0] = CMD_GET_FILE;
+	cmd[0] = (followSymlinks ? CMD_GET_FILE_FOLLOWSYMLINKS : CMD_GET_FILE);
 	reqPathLen = strnlen(reqPath, ARG_MAX_LEN-1);
 	if ( reqPathLen == ARG_MAX_LEN-1 )
 	{
@@ -499,6 +420,7 @@ int main(int argc, char** argv)
 	const struct file_metadata* fm_trusted;
 	unsigned char digest[32];
 	const unsigned char* digest_trusted;
+	unsigned char digest_nonfs_trusted[32];	// File with the known-good hash isn't memory-mapped.
 	int bDataMismatch;
 	int numMismatchedFiles;
 
@@ -609,8 +531,10 @@ int main(int argc, char** argv)
 		return -1;
 	}
 
-	// == VERIFICATION ==
+	// == FILE VERIFICATION ==
 
+	// FIXME: Something's wrong with the second part of verification. I'll put this back when I fix it.
+	printf("\n-- Checking metadata and hashes of files in block devices with EXT4 filesystems... --\n");
 	for ( i = 0; i < NUM_PARTITIONS; i++ )
 	{
 		printf("\n==== %s ====\n", partitions_to_check[i]);
@@ -688,13 +612,14 @@ int main(int argc, char** argv)
 		numMismatchedFiles = 0;
 		for ( j = 0; j < numRecords; j++ )
 		{
+			// Pointer arithmetic is scary, but I know what I'm doing here.
 			fm_trusted = metadataFileAddr + j * (sizeof(struct file_metadata) + 32);
 			digest_trusted = metadataFileAddr + j * (sizeof(struct file_metadata) + 32) + sizeof(struct file_metadata);
 
 			strncpy(curFileRequest, fm_trusted->filepath, fm_trusted->filepathLen);
 			memset(digest, '\0', 32);
 			curFileRequest[fm_trusted->filepathLen] = '\0';
-			if ( GetFileMetaAndHash(descFD, epInID, epOutID, curFileRequest, &fm, digest) < 0 )
+			if ( GetFileMetaAndHash(descFD, epInID, epOutID, curFileRequest, 0, &fm, digest) < 0 )
 			{
 				// Let's call it a mismatch. File could have been deleted, or God knows what else could have happened.
 				printf("!! Failed to verify %s; considering it a mismatch and continuing on !!\n", curFileRequest);
@@ -733,11 +658,11 @@ int main(int argc, char** argv)
 			if ( memcmp(digest_trusted, digest, 32) != 0 )
 			{
 				printf("!! %s: CONTENTS CHANGED !!\n", curFileRequest);
-				printf("!!\tstored SHA256 hash: ");
+				printf("!!\tstored hash: ");
 				for ( k = 0; k < 32; k++ )
 					printf("%02hhx", digest_trusted[k]);
 				printf("\t!!\n");
-				printf("!!\treceived SHA256 hash: ");
+				printf("!!\treceived hash: ");
 				for ( k = 0; k < 32; k++ )
 					printf("%02hhx", digest[k]);
 				printf("\t!!\n");
@@ -751,6 +676,106 @@ int main(int argc, char** argv)
 		UnmountPartition(descFD, epInID, epOutID, partitions_to_check[i]);
 		munmap((char*)metadataFileAddr, (size_t)statbuf.st_size);
 		close(metadataFileFD);
+	}
+
+	// == BLOCK DEVICE VERIFICATION ==
+
+	printf("\n-- Checking hashes of partitions lacking EXT4 filesystems... --\n");
+	for ( i = 0; i < NUM_NONFS_PARTITIONS; i++ )
+	{
+		printf("\n==== %s ====\n", nonfs_partitions_to_check[i]);
+
+		snprintf(curMetadataFile, NAME_MAX, "hash_%s.dat", nonfs_partitions_to_check[i]);
+		ret = stat(curMetadataFile, &statbuf);
+		if ( ret < 0 )
+		{
+			if ( errno == ENOENT )
+			{
+				printf("-- Trusted metadata file %s not present; creating and populating it... --\n", curMetadataFile);
+				printf("-- WARNING: It is strongly recommended that you do this no later than after a fresh Android ");
+				printf("installation --\n");
+
+				metadataFileFD = open(curMetadataFile, O_WRONLY | O_CREAT, 0600);
+				if ( metadataFileFD < 0 )
+				{
+					printf("!! Couldn't create file %s: %s !!\n", curMetadataFile, strerror(errno));
+					continue;
+				}
+
+				// Get the metadata and hash of the partition itself.
+				snprintf(curFileRequest, ARG_MAX_LEN, "%s/%s", BLOCK_BY_NAME_PATH, nonfs_partitions_to_check[i]);
+				if ( GetFileMetaAndHash(descFD, epInID, epOutID, curFileRequest, 1, &fm, digest) < 0 )
+				{
+					close(metadataFileFD);
+					unlink(curMetadataFile);
+					continue;
+				}
+				// Just write the hash. Devfs is a virtual file system, so file metadata doesn't really matter.
+				if ( write(metadataFileFD, digest, 32) < 0 )
+				{
+					printf("!! Error writing to %s: %s !!\n", curMetadataFile, strerror(errno));
+					close(metadataFileFD);
+					unlink(curMetadataFile);
+					continue;
+				}
+
+				close(metadataFileFD);
+			}
+			else
+			{
+				printf("!! Skipping %s due to stat error: %s !!\n", curMetadataFile, strerror(errno));
+			}
+
+			continue;
+		}
+
+		// Get the partition's hash and compare it.
+
+		if ( (size_t)statbuf.st_size != 32 )
+		{
+			printf("!! Size of %s not equal to the hash digest length !!\n", curMetadataFile);
+			continue;
+		}
+		printf("-- Verifying hash of %s... --\n", nonfs_partitions_to_check[i]);
+
+		metadataFileFD = open(curMetadataFile, O_RDONLY);
+		if ( metadataFileFD < 0 )
+		{
+			printf("!! Couldn't open %s for reading: %s !!\n", curMetadataFile, strerror(errno));
+			continue;
+		}
+		if ( read(metadataFileFD, digest_nonfs_trusted, 32) < 0 )
+		{
+			printf("!! Unable to get the known-good hash of partition %s: %s !!\n", curMetadataFile, strerror(errno));
+			close(metadataFileFD);
+			continue;
+		}
+		close(metadataFileFD);
+
+		snprintf(curFileRequest, ARG_MAX_LEN, "%s/%s", BLOCK_BY_NAME_PATH, nonfs_partitions_to_check[i]);
+		if ( GetFileMetaAndHash(descFD, epInID, epOutID, curFileRequest, 1, &fm, digest) < 0 )
+		{
+			close(metadataFileFD);
+			continue;
+		}
+
+		if ( memcmp(digest_nonfs_trusted, digest, 32) != 0 )
+		{
+			printf("!! %s: CONTENTS CHANGED !!\n", curFileRequest);
+			printf("!!\tstored hash: ");
+			for ( k = 0; k < 32; k++ )
+				printf("%02hhx", digest_nonfs_trusted[k]);
+			printf("\t!!\n");
+			printf("!!\treceived hash: ");
+			for ( k = 0; k < 32; k++ )
+				printf("%02hhx", digest[k]);
+			printf("\t!!\n");
+		}
+		else
+		{
+			printf("-- Partition %s unmodified --\n", nonfs_partitions_to_check[i]);
+		}
+
 	}
 
 	// == CLEANUP ==

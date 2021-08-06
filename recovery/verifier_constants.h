@@ -19,11 +19,12 @@
 #define OUT_ADDR (1 | USB_DIR_OUT)	// NOTE: "Out" from the host's perspective.
 
 // Commands
-#define CMD_MNT_DEV	0xbd
-#define CMD_UMNT_DEV	0x0d
-#define CMD_GET_FILE	0x9f
-#define CMD_GET_ALL	0xaf
-#define CMD_SHUTDOWN	0x5d
+#define CMD_MNT_DEV			0xbd
+#define CMD_UMNT_DEV			0x0d
+#define CMD_GET_FILE_FOLLOWSYMLINKS	0x95
+#define CMD_GET_FILE			0x9f
+#define CMD_GET_ALL			0xaf
+#define CMD_SHUTDOWN			0x5d
 
 // Responses
 #define SUCCESS			"\x55"
@@ -32,6 +33,7 @@
 #define ERR_NO_ARG		"\x0a"
 #define ERR_DIR_CLIMBING	"\xdc"
 #define ERR_STAT		"\x57"
+#define ERR_IOCTL		"\x10"
 #define ERR_MKDIR		"\xdd"
 #define ERR_MOUNT		"\xb0"
 #define ERR_UMOUNT		"\x0b"
@@ -49,7 +51,7 @@ struct file_metadata {
 	mode_t	mode;
 	size_t contextLen;
 	char selinuxContext[SELINUX_CONTEXT_MAX_LEN];
-	off_t	fileSize;
+	size_t	fileSize;
 };
 
 

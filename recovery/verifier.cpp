@@ -1,5 +1,6 @@
 // TODO: Add a description about this file.
 // TODO: Need to add MitM protections, if possible.
+// FIXME: There are no checks to make sure that size_t really is 64 bits long, just like uint64_t. THIS COULD BE DANGEROUS.
 
 // IMPORTS
 // TODO: Clean up unused imports.
@@ -67,24 +68,30 @@ RecoveryUI* ui = nullptr;
 
 // Gets a file by path and sends it to the host.
 // Doesn't return anything. If it fails, the host is responsible for retrying.
-void SendFileToHost(int filepathLen, const char* filepath)
+void SendFileToHost(int filepathLen, const char* filepath, bool followSymlinks)
 {
+	int ret;
 	struct stat statbuf;
 	struct file_metadata fm;
 	ssize_t bytesRead, bytesToRead, bytesLeftToRead;
 	char* selinuxContext_temp = nullptr;
+	uint64_t blockDevSize_temp;
 	char responseMetadata[1 + ARG_MAX_LEN + sizeof(struct file_metadata)];
-	int fileFD;
+	int fileFD = -1;
 	char responseFileBlock[1 + FILE_TRANSFER_BLOCK_SIZE];
 	long bytesSent;
-	long i;
+	unsigned long i;
 #ifdef VERBOSE
 	SHA256_CTX ctx;
 	unsigned char digest[32];
 #endif
 
 	// Get the file metadata.
-	if ( lstat(filepath, &statbuf) < 0 )
+	if ( followSymlinks )
+		ret = stat(filepath, &statbuf);
+	else
+		ret = lstat(filepath, &statbuf);
+	if ( ret < 0 )
 	{
 		ui->Print(" !! Could not stat %s: %s !!\n\n", filepath, strerror(errno));
 		WriteToHost(ERR_STAT, 1);
@@ -102,19 +109,42 @@ void SendFileToHost(int filepathLen, const char* filepath)
 	strncpy((char*)responseMetadata, FILE_METADATA, 1);
 	
 	// First put the metadata: filename, mode, uid, gid, mode (perm + type), size, and SELinux context.
+	memset(&fm, '\0', sizeof(struct file_metadata));
 	fm.filepathLen = filepathLen;
 	strncpy(fm.filepath, filepath, filepathLen);
 	fm.uid = statbuf.st_uid;
 	fm.gid = statbuf.st_gid;
 	fm.mode = statbuf.st_mode;
-	fm.fileSize = (S_ISREG(statbuf.st_mode) ? statbuf.st_size : 0);
-	fm.contextLen = lgetfilecon(filepath, &selinuxContext_temp);
+	if ( S_ISBLK(statbuf.st_mode) )	// Need to call ioctl() to get the size of a block device.
+	{
+		fileFD = open(filepath, O_RDONLY);
+		if ( fileFD < 0 )
+		{
+			ui->Print(" !! Failed to open %s: %s !!\n\n", filepath, strerror(errno));
+			WriteToHost(ERR_OPEN, 1);
+			return;
+		}
+		if ( ioctl(fileFD, BLKGETSIZE64, &blockDevSize_temp) < 0 )
+		{
+			ui->Print(" !! Unable to get the size of block device %s: %s !!\n\n", filepath, strerror(errno));
+			WriteToHost(ERR_IOCTL, 1);
+			return;
+		}
+		// FIXME: What if size_t isn't an unsigned long?
+		fm.fileSize = blockDevSize_temp;
+	}
+	else
+		fm.fileSize = (S_ISREG(statbuf.st_mode) ? statbuf.st_size : 0);
+	fm.contextLen = followSymlinks
+				? getfilecon(filepath, &selinuxContext_temp)
+				: lgetfilecon(filepath, &selinuxContext_temp);
 	if ( (signed long)fm.contextLen > SELINUX_CONTEXT_MAX_LEN - 1 )
 		fm.contextLen = SELINUX_CONTEXT_MAX_LEN - 1;
 	if ( (signed long)fm.contextLen > 0 )
 	{
 		strncpy(fm.selinuxContext, selinuxContext_temp, fm.contextLen);
 		fm.selinuxContext[fm.contextLen] = '\0';
+		freecon(selinuxContext_temp);
 	}
 	else
 		ui->Print(" ?? Failed to get SELinux context for %s: %s ??\n\n", filepath, strerror(errno));
@@ -130,6 +160,7 @@ void SendFileToHost(int filepathLen, const char* filepath)
 	}
 #ifdef VERBOSE
 	ui->Print(" File %s (%lu):\n", fm.filepath, fm.filepathLen);
+	ui->Print("     Followed Symlink: %d\n", followSymlinks);
 	ui->Print("     Size: %ld\n", fm.fileSize);
 	ui->Print("     UID: %d\n", fm.uid);
 	ui->Print("     GID: %d\n", fm.gid);
@@ -139,9 +170,10 @@ void SendFileToHost(int filepathLen, const char* filepath)
 
 	// Now we send the whole file itself.
 	// Obviously not applicable in the case of directories or other non-regular files.
-	if ( S_ISREG(statbuf.st_mode) )
+	if ( S_ISREG(statbuf.st_mode) || S_ISBLK(statbuf.st_mode) )
 	{
-		fileFD = open(filepath, O_RDONLY);
+		if ( fileFD < 0 )
+			fileFD = open(filepath, O_RDONLY);
 		if ( fileFD < 0 )
 		{
 			ui->Print(" !! Failed to open %s: %s !!\n\n", filepath, strerror(errno));
@@ -153,11 +185,11 @@ void SendFileToHost(int filepathLen, const char* filepath)
 		// NOTE: Do NOT change the following without also changing it in the host code!
 		//	 You risk desynchronization if you don't.
 		responseFileBlock[0] = FILE_CONTENT[0];
-		bytesLeftToRead = statbuf.st_size;
+		bytesLeftToRead = fm.fileSize;
 #ifdef VERBOSE
 		SHA256_Init(&ctx);
 #endif
-		for ( i = 0; i < statbuf.st_size; i += FILE_TRANSFER_BLOCK_SIZE )
+		for ( i = 0; i < fm.fileSize; i += FILE_TRANSFER_BLOCK_SIZE )
 		{
 			//memcpy(responseFileBlock + 1, '\0', FILE_TRANSFER_BLOCK_SIZE);
 			bytesToRead = (bytesLeftToRead > FILE_TRANSFER_BLOCK_SIZE
@@ -227,13 +259,15 @@ int SendAllUnderDir(int dirpathLen, const char* dirpath)
 		curPath_len = strnlen(curPath, NAME_MAX);
 
 		// Send the current dirent to the host, and if it's a directory, recurse into it as well.
-		SendFileToHost(curPath_len, curPath);
+		// NOTE: Don't follow symlinks, but get info about the links themselves.
+		SendFileToHost(curPath_len, curPath, false);
 		dirEntsSent++;
 		if ( curDirEnt->d_type == DT_DIR )
 			dirEntsSent += SendAllUnderDir(curPath_len, curPath);
 
 		curDirEnt = readdir(curDir);
 	}
+	closedir(curDir);
 
 	// Since the function's recursive, don't send the SUCCESS byte here. Send it after the topmost function call is done.
 	return dirEntsSent;
@@ -425,6 +459,7 @@ int main(int argc, char** argv)
 				break;
 
 			// Gets a file's metadata and data, and sends both to the host.
+			case CMD_GET_FILE_FOLLOWSYMLINKS:
 			case CMD_GET_FILE:
 				filepathLen = strnlen(recvMsg + 1, ARG_MAX_LEN-1);
 				if ( filepathLen == 0 )
@@ -443,7 +478,7 @@ int main(int argc, char** argv)
 					break;
 				}
 
-				SendFileToHost(filepathLen, filepath);
+				SendFileToHost(filepathLen, filepath, recvMsg[0] == CMD_GET_FILE_FOLLOWSYMLINKS);
 
 				break;
 
