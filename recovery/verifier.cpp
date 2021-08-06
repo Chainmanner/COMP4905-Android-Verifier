@@ -42,8 +42,6 @@
 #include <cutils/sockets.h>
 #include <private/android_logger.h> /* private pmsg functions */
 
-#include <openssl/sha.h>
-
 #include "recovery_ui/device.h"
 #include "recovery_ui/stub_ui.h"
 #include "recovery_ui/ui.h"
@@ -83,10 +81,6 @@ void SendFileToHost(int filepathLen, const char* filepath, bool followSymlinks)
 	char responseFileBlock[1 + FILE_TRANSFER_BLOCK_SIZE];
 	long bytesSent;
 	unsigned long i;
-#ifdef VERBOSE
-	SHA256_CTX ctx;
-	unsigned char digest[32];
-#endif
 
 	// Get the file metadata.
 	if ( followSymlinks )
@@ -199,9 +193,6 @@ void SendFileToHost(int filepathLen, const char* filepath, bool followSymlinks)
 		//	 You risk desynchronization if you don't.
 		responseFileBlock[0] = FILE_CONTENT[0];
 		bytesLeftToRead = fm.fileSize;
-#ifdef VERBOSE
-		SHA256_Init(&ctx);
-#endif
 		for ( i = 0; i < fm.fileSize; i += FILE_TRANSFER_BLOCK_SIZE )
 		{
 			//memcpy(responseFileBlock + 1, '\0', FILE_TRANSFER_BLOCK_SIZE);
@@ -215,9 +206,6 @@ void SendFileToHost(int filepathLen, const char* filepath, bool followSymlinks)
 			bytesLeftToRead -= bytesRead;
 			bytesSent = WriteToHost(responseFileBlock, 1 + bytesRead);
 			if ( bytesSent < 0 ) break;
-#ifdef VERBOSE
-			SHA256_Update(&ctx, responseFileBlock + 1, bytesRead);
-#endif
 		}
 		close(fileFD);
 		if ( bytesRead < 0 )
@@ -232,13 +220,6 @@ void SendFileToHost(int filepathLen, const char* filepath, bool followSymlinks)
 			// Don't bother sending an error message; the failure could be because the EP closed.
 			return;
 		}
-#ifdef VERBOSE
-		SHA256_Final(digest, &ctx);
-		ui->Print("     SHA256: ");
-		for ( i = 0; i < 32; i++ )
-			ui->Print("%02hhx", digest[i]);
-		ui->Print("\n\n");
-#endif
 	}
 	WriteToHost(SUCCESS, 1);
 }

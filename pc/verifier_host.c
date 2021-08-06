@@ -18,6 +18,7 @@
 #include <linux/usb/ch9.h>
 
 #include <openssl/sha.h>
+#include <openssl/evp.h>
 
 #include "verifier_constants.h"
 
@@ -31,6 +32,9 @@
 
 #define USB_TRANSFER_LIMIT (16 * 1024)
 #define TIMEOUT 0
+
+#define HASHFUNC EVP_blake2b512()	// The hash function to use.
+#define HASHLEN 64			// The length of the hash function's digest in BYTES.
 
 #define NUM_PARTITIONS 4
 const char* partitions_to_check[] = {	// NOTE: Filesystems of the provided partitions MUST be EXT4.
@@ -238,9 +242,9 @@ int RebootDevice(int descFD, int epOutID)
 	return 0;
 }
 
-// Receives a file's metadata from the device, and generates a SHA256 digest of its contents as they are received.
+// Receives a file's metadata from the device, and generates a digest of its contents as they are received.
 // Returns 0 on success, -1 on failure, and 1 if a success response was received when file metadata was expected.
-// WARNING: digest MUST be at least 32 bytes long or else a buffer overflow will happen!
+// WARNING: digest MUST be at least as long as the digest length or else a buffer overflow will happen!
 int ReceiveFileMetaAndHash(int descFD, int epInID, struct file_metadata* fm, unsigned char* digest)
 {
 	char responseMetadata[1 + sizeof(struct file_metadata)];
@@ -251,7 +255,7 @@ int ReceiveFileMetaAndHash(int descFD, int epInID, struct file_metadata* fm, uns
 	size_t bytesLeftToRead;
 	size_t bytesReadTotal = 0;
 	size_t i;
-	SHA256_CTX ctx;
+	EVP_MD_CTX* ctx;
 
 	if ( ReadFromDevice(descFD, epInID, responseMetadata, 1 + sizeof(struct file_metadata)) < 0 )
 		return -1;
@@ -265,7 +269,7 @@ int ReceiveFileMetaAndHash(int descFD, int epInID, struct file_metadata* fm, uns
 	}
 	memcpy(fm, responseMetadata + 1, sizeof(struct file_metadata));
 
-	memset(digest, '\0', 32);
+	memset(digest, '\0', HASHLEN);
 	if ( S_ISREG(fm->mode) || S_ISBLK(fm->mode) )
 	{
 		// We need to receive the bytes from the device EXACTLY as they are sent, or else we could get a deadlock.
@@ -273,7 +277,8 @@ int ReceiveFileMetaAndHash(int descFD, int epInID, struct file_metadata* fm, uns
 		//	 You risk desynchronization if you don't.
 		fileSize = (size_t)fm->fileSize;
 		bytesLeftToRead = fileSize;
-		SHA256_Init(&ctx);
+		ctx = EVP_MD_CTX_new();
+		EVP_DigestInit_ex(ctx, HASHFUNC, NULL);
 		for ( i = 0; i < fileSize; i += FILE_TRANSFER_BLOCK_SIZE )
 		{
 			bytesToRead = (bytesLeftToRead > FILE_TRANSFER_BLOCK_SIZE ? FILE_TRANSFER_BLOCK_SIZE : bytesLeftToRead);
@@ -283,9 +288,10 @@ int ReceiveFileMetaAndHash(int descFD, int epInID, struct file_metadata* fm, uns
 			if ( bytesRead < 0 ) break;
 			bytesLeftToRead -= bytesRead - 1;
 			bytesReadTotal += bytesRead - 1;
-			SHA256_Update(&ctx, responseFileBlock + 1, bytesRead - 1);
+			EVP_DigestUpdate(ctx, responseFileBlock + 1, bytesRead - 1);
 		}
-		SHA256_Final(digest, &ctx);
+		EVP_DigestFinal_ex(ctx, digest, NULL);
+		EVP_MD_CTX_free(ctx);
 		if ( bytesRead < 0 )	// Explanation for failure already provided by ReadFromDevice().
 			return -1;
 	}
@@ -306,9 +312,9 @@ int ReceiveFileMetaAndHash(int descFD, int epInID, struct file_metadata* fm, uns
 	return 0;
 }
 
-// Requests a file from the device, gets its metadata, and if it's a regular file, generates a SHA256 digest of its contents.
+// Requests a file from the device, gets its metadata, and if it's a regular file, generates a digest of its contents.
 // Not to be confused with ReceiveFileMetaAndHash(), which only handles reception. Returns 0 on success, -1 on failure.
-// WARNING: digest MUST be at least 32 bytes long or else a buffer overflow will happen!
+// WARNING: digest MUST be at least as long as the digest length or else a buffer overflow will happen!
 int GetFileMetaAndHash(int descFD, int epInID, int epOutID, const char* reqPath, int followSymlinks, struct file_metadata* fm,
 	unsigned char* digest)
 {
@@ -334,8 +340,8 @@ int GetFileMetaAndHash(int descFD, int epInID, int epOutID, const char* reqPath,
 	ret = ReceiveFileMetaAndHash(descFD, epInID, fm, digest);
 	/*if ( ret == 0 )
 	{
-		printf("-- Received file %s having SHA256 digest ", reqPath);
-		for ( i = 0; i < 32; i++ ) printf("%02hhx", digest[i]);
+		printf("-- Received file %s having digest ", reqPath);
+		for ( i = 0; i < HASHLEN; i++ ) printf("%02hhx", digest[i]);
 		printf(" --\n");
 	}*/
 	return ret;
@@ -351,7 +357,7 @@ int GetAllFilesUnderDir(int descFD, int epInID, int epOutID, const char* reqPath
 	int reqPathLen;
 	int ret;
 	struct file_metadata fm;
-	unsigned char digest[32];
+	unsigned char digest[HASHLEN];
 
 	cmd[0] = CMD_GET_ALL;
 	reqPathLen = strnlen(reqPath, ARG_MAX_LEN-1);
@@ -374,7 +380,7 @@ int GetAllFilesUnderDir(int descFD, int epInID, int epOutID, const char* reqPath
 		if ( saveFileFD >= 0 )
 		{
 			if ( write(saveFileFD, &fm, sizeof(struct file_metadata)) < 0
-				|| write(saveFileFD, digest, 32) < 0 )
+				|| write(saveFileFD, digest, HASHLEN) < 0 )
 			{
 				printf("!! Error writing metadata for files under %s: %s !!\n", reqPath, strerror(errno));
 				return -1;
@@ -419,9 +425,9 @@ int main(int argc, char** argv)
 	char curFileRequest[ARG_MAX_LEN];
 	struct file_metadata fm;
 	const struct file_metadata* fm_trusted;
-	unsigned char digest[32];
+	unsigned char digest[HASHLEN];
 	const unsigned char* digest_trusted;
-	unsigned char digest_nonfs_trusted[32];	// File with the known-good hash isn't memory-mapped.
+	unsigned char digest_nonfs_trusted[HASHLEN];	// File with the known-good hash isn't memory-mapped.
 	int bDataMismatch;
 	int numMismatchedFiles;
 
@@ -534,7 +540,6 @@ int main(int argc, char** argv)
 
 	// == FILE VERIFICATION ==
 
-	// FIXME: Something's wrong with the second part of verification. I'll put this back when I fix it.
 	printf("\n-- Checking metadata and hashes of files in block devices with EXT4 filesystems... --\n");
 	for ( i = 0; i < NUM_PARTITIONS; i++ )
 	{
@@ -557,7 +562,7 @@ int main(int argc, char** argv)
 					continue;
 				}
 
-				// Get the metadata and SHA256 of each file in this partition, after mounting it, from the device.
+				// Get the metadata and hash of each file in this partition, after mounting it, from the device.
 				if ( MountPartition(descFD, epInID, epOutID, partitions_to_check[i]) < 0 )
 					continue;
 				snprintf(curFileRequest, ARG_MAX_LEN, "%s/%s", MOUNTPOINT_PREFIX, partitions_to_check[i]);
@@ -581,13 +586,13 @@ int main(int argc, char** argv)
 		}
 
 		// Get the number of records in the file. Fail if the file size isn't evenly divisible by the record size.
-		if ( (size_t)statbuf.st_size % (sizeof(struct file_metadata) + 32) != 0 )
+		if ( (size_t)statbuf.st_size % (sizeof(struct file_metadata) + HASHLEN) != 0 )
 		{
 			printf("!! Size of %s (%ld) not divisible by %lu !!\n", curMetadataFile, statbuf.st_size,
-				sizeof(struct file_metadata) + 32);
+				sizeof(struct file_metadata) + HASHLEN);
 			continue;
 		}
-		numRecords = (unsigned int)((size_t)statbuf.st_size / (sizeof(struct file_metadata) + 32));
+		numRecords = (unsigned int)((size_t)statbuf.st_size / (sizeof(struct file_metadata) + HASHLEN));
 
 		// File full of metadata exists; verify the device's contents.
 		if ( MountPartition(descFD, epInID, epOutID, partitions_to_check[i]) < 0 )
@@ -614,11 +619,12 @@ int main(int argc, char** argv)
 		for ( j = 0; j < numRecords; j++ )
 		{
 			// Pointer arithmetic is scary, but I know what I'm doing here.
-			fm_trusted = metadataFileAddr + j * (sizeof(struct file_metadata) + 32);
-			digest_trusted = metadataFileAddr + j * (sizeof(struct file_metadata) + 32) + sizeof(struct file_metadata);
+			fm_trusted = metadataFileAddr + j * (sizeof(struct file_metadata) + HASHLEN);
+			digest_trusted = metadataFileAddr + j * (sizeof(struct file_metadata) + HASHLEN) +
+						sizeof(struct file_metadata);
 
 			strncpy(curFileRequest, fm_trusted->filepath, fm_trusted->filepathLen);
-			memset(digest, '\0', 32);
+			memset(digest, '\0', HASHLEN);
 			curFileRequest[fm_trusted->filepathLen] = '\0';
 			if ( GetFileMetaAndHash(descFD, epInID, epOutID, curFileRequest, 0, &fm, digest) < 0 )
 			{
@@ -663,15 +669,15 @@ int main(int argc, char** argv)
 				bDataMismatch = 1;
 			}
 			// Now, compare the file hashes.
-			if ( memcmp(digest_trusted, digest, 32) != 0 )
+			if ( memcmp(digest_trusted, digest, HASHLEN) != 0 )
 			{
 				printf("!! %s: CONTENTS CHANGED !!\n", curFileRequest);
 				printf("!!\tstored hash: ");
-				for ( k = 0; k < 32; k++ )
+				for ( k = 0; k < HASHLEN; k++ )
 					printf("%02hhx", digest_trusted[k]);
 				printf("\t!!\n");
 				printf("!!\treceived hash: ");
-				for ( k = 0; k < 32; k++ )
+				for ( k = 0; k < HASHLEN; k++ )
 					printf("%02hhx", digest[k]);
 				printf("\t!!\n");
 				bDataMismatch = 1;
@@ -719,7 +725,7 @@ int main(int argc, char** argv)
 					continue;
 				}
 				// Just write the hash. Devfs is a virtual file system, so file metadata doesn't really matter.
-				if ( write(metadataFileFD, digest, 32) < 0 )
+				if ( write(metadataFileFD, digest, HASHLEN) < 0 )
 				{
 					printf("!! Error writing to %s: %s !!\n", curMetadataFile, strerror(errno));
 					close(metadataFileFD);
@@ -739,7 +745,7 @@ int main(int argc, char** argv)
 
 		// Get the partition's hash and compare it.
 
-		if ( (size_t)statbuf.st_size != 32 )
+		if ( (size_t)statbuf.st_size != HASHLEN )
 		{
 			printf("!! Size of %s not equal to the hash digest length !!\n", curMetadataFile);
 			continue;
@@ -752,7 +758,7 @@ int main(int argc, char** argv)
 			printf("!! Couldn't open %s for reading: %s !!\n", curMetadataFile, strerror(errno));
 			continue;
 		}
-		if ( read(metadataFileFD, digest_nonfs_trusted, 32) < 0 )
+		if ( read(metadataFileFD, digest_nonfs_trusted, HASHLEN) < 0 )
 		{
 			printf("!! Unable to get the known-good hash of partition %s: %s !!\n", curMetadataFile, strerror(errno));
 			close(metadataFileFD);
@@ -767,15 +773,15 @@ int main(int argc, char** argv)
 			continue;
 		}
 
-		if ( memcmp(digest_nonfs_trusted, digest, 32) != 0 )
+		if ( memcmp(digest_nonfs_trusted, digest, HASHLEN) != 0 )
 		{
 			printf("!! %s: CONTENTS CHANGED !!\n", curFileRequest);
 			printf("!!\tstored hash: ");
-			for ( k = 0; k < 32; k++ )
+			for ( k = 0; k < HASHLEN; k++ )
 				printf("%02hhx", digest_nonfs_trusted[k]);
 			printf("\t!!\n");
 			printf("!!\treceived hash: ");
-			for ( k = 0; k < 32; k++ )
+			for ( k = 0; k < HASHLEN; k++ )
 				printf("%02hhx", digest[k]);
 			printf("\t!!\n");
 		}
