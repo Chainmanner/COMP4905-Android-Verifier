@@ -19,6 +19,7 @@
 #define OUT_ADDR (1 | USB_DIR_OUT)	// NOTE: "Out" from the host's perspective.
 
 // Commands
+#define CMD_GET_PARTS			0x9d
 #define CMD_MNT_DEV			0xbd
 #define CMD_UMNT_DEV			0x0d
 #define CMD_GET_FILE_FOLLOWSYMLINKS	0x95
@@ -44,13 +45,15 @@
 
 // Apparently the stat struct may differ across architectures, so to be safe, here's a definition with only the necessary types.
 struct file_metadata {
-	size_t filepathLen;
-	char filepath[ARG_MAX_LEN];
+	size_t	filepathLen;
+	char	filepath[ARG_MAX_LEN];
 	uid_t	uid;
 	gid_t	gid;
 	mode_t	mode;
-	size_t contextLen;
-	char selinuxContext[SELINUX_CONTEXT_MAX_LEN];
+	size_t	contextLen;
+	char	selinuxContext[SELINUX_CONTEXT_MAX_LEN];
+	size_t	symlinkDestLen;
+	char	symlinkDest[ARG_MAX_LEN];
 	size_t	fileSize;
 };
 

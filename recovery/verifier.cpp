@@ -106,11 +106,13 @@ void SendFileToHost(int filepathLen, const char* filepath, bool followSymlinks)
 	
 	// First put the metadata: filename, mode, uid, gid, mode (perm + type), size, and SELinux context.
 	memset(&fm, '\0', sizeof(struct file_metadata));
+	// File path, UID, GID, type and permission bits.
 	fm.filepathLen = filepathLen;
 	strncpy(fm.filepath, filepath, filepathLen);
 	fm.uid = statbuf.st_uid;
 	fm.gid = statbuf.st_gid;
 	fm.mode = statbuf.st_mode;
+	// Block device/directory/file size.
 	if ( S_ISBLK(statbuf.st_mode) )	// Need to call ioctl() to get the size of a block device.
 	{
 		fileFD = open(filepath, O_RDONLY);
@@ -142,6 +144,7 @@ void SendFileToHost(int filepathLen, const char* filepath, bool followSymlinks)
 		fm.fileSize = statbuf.st_size;
 	else
 		fm.fileSize = 0;
+	// SELinux context.
 	fm.contextLen = followSymlinks
 				? getfilecon(filepath, &selinuxContext_temp)
 				: lgetfilecon(filepath, &selinuxContext_temp);
@@ -155,6 +158,16 @@ void SendFileToHost(int filepathLen, const char* filepath, bool followSymlinks)
 	}
 	else
 		ui->Print(" ?? Failed to get SELinux context for %s: %s ??\n\n", filepath, strerror(errno));
+	// Symlink destination.
+	fm.symlinkDestLen = 0;
+	if ( S_ISLNK(statbuf.st_mode) )
+	{
+		fm.symlinkDestLen = readlink(filepath, fm.symlinkDest, ARG_MAX_LEN-1);
+		if ( fm.symlinkDestLen > 0 )
+			fm.symlinkDest[fm.symlinkDestLen] = '\0';
+		else
+			fm.symlinkDestLen = 0;
+	}
 	memcpy((char*)responseMetadata + 1, &fm, sizeof(struct file_metadata));
 
 	// Send the metadata.
@@ -173,6 +186,7 @@ void SendFileToHost(int filepathLen, const char* filepath, bool followSymlinks)
 	ui->Print("     GID: %d\n", fm.gid);
 	ui->Print("     Mode: %o\n", fm.mode);
 	ui->Print("     SELinux Context: %s (%lu)\n", fm.selinuxContext, fm.contextLen);
+	ui->Print("     Symlink Destination: %s (%lu)\n", fm.symlinkDest, fm.symlinkDestLen);
 #endif
 
 	// Now we send the whole file itself.
@@ -335,6 +349,14 @@ int main(int argc, char** argv)
 	ui->Print(" Ready to receive commands...\n\n");
 	ssize_t bytesRead;
 	char recvMsg[1 + ARG_MAX_LEN];	// Includes the action to perform and the file to send (if applicable).
+	// Counters.
+	int i;
+	// CMD_GET_PARTS variables.
+	struct dirent** dirEnts;
+	int numDirEnts;
+	struct dirent* curDirEnt;
+	int curDirEnt_nameLen;
+	char curDevPath[NAME_MAX];
 	// CMD_MNT_DEV and CMD_UMNT_DEV variables.
 	int devnameLen;
 	char devname[ARG_MAX_LEN];
@@ -361,6 +383,44 @@ int main(int argc, char** argv)
 		//ui->Print(" Command: %hhX | Arg: %s\n", recvMsg[0], recvMsg + 1);
 		switch ( recvMsg[0] )	// First byte indicates the action to undertake.
 		{
+			// Gets all the partitions on the device, marking which ones have mountable filesystems.
+			case CMD_GET_PARTS:
+
+				ui->Print(" List of partitions on this device:\n");
+				mkdir("/tmp/mount_test", 0700);
+				numDirEnts = scandir(BLOCK_BY_NAME_PATH, &dirEnts, NULL, alphasort);
+				for ( i = 0; i < numDirEnts; i++ )
+				{
+					curDirEnt = dirEnts[i];
+					curDirEnt_nameLen = strnlen(curDirEnt->d_name, 255);
+					if ( !strncmp(curDirEnt->d_name, ".", curDirEnt_nameLen)
+						|| !strncmp(curDirEnt->d_name, "..", curDirEnt_nameLen) )
+						continue;
+
+					ui->Print("    %s", curDirEnt->d_name);
+
+					// To determine whether this partition has a filesystem or not, try mounting it.
+					snprintf(curDevPath, NAME_MAX, "%s/%s", BLOCK_BY_NAME_PATH, curDirEnt->d_name);
+					if ( !mount(curDevPath, "/tmp/mount_test", "ext4",
+						MS_RDONLY | MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, "") )
+					{
+						ui->Print(" (EXT4)");
+						umount("/tmp/mount_test");
+					}
+					else if ( !mount(curDevPath, "/tmp/mount_test", "f2fs",
+						MS_RDONLY | MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, "") )
+					{
+						ui->Print(" (F2FS)");
+						umount("/tmp/mount_test");
+					}
+					ui->Print("\n");
+				}
+				free(dirEnts);
+				rmdir("/tmp/mount_test");
+				ui->Print("\n");
+
+				break;
+
 			// Mounts a block device.
 			case CMD_MNT_DEV:
 				devnameLen = strnlen(recvMsg + 1, ARG_MAX_LEN-1);
@@ -396,11 +456,12 @@ int main(int argc, char** argv)
 				}
 
 				// Now let's actually mount the block device to the directory.
+				// If we fail to mount it as EXT4, try mounting it as F2FS.
 				// Read-only, access times not updated, no device files, and no program execution.
 				// SUID and SGID is also disabled, though with exec disabled, it's kind of redundant.
-				// NOTE: For non-encrypted partitions, Android uses EXT4. For encrypted partitions, it uses F2FS, but
-				//	 there's no point in checking encrypted user data.
 				if ( mount(devpath_by_name, mountpath, "ext4",
+					MS_RDONLY | MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, "") < 0
+				     && mount(devpath_by_name, mountpath, "f2fs",
 					MS_RDONLY | MS_NOATIME | MS_NODEV | MS_NOEXEC | MS_NOSUID, "") < 0 )
 				{
 					ui->Print(" !! Unable to mount %s: %s !!\n\n", devpath_by_name, strerror(errno));

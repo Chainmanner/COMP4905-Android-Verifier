@@ -36,18 +36,18 @@
 #define HASHFUNC EVP_blake2b512()	// The hash function to use.
 #define HASHLEN 64			// The length of the hash function's digest in BYTES.
 
-#define NUM_PARTITIONS 4
-const char* partitions_to_check[] = {	// NOTE: Filesystems of the provided partitions MUST be EXT4.
-	"system_a",
-	"system_b",
-	"vendor_a",
-	"vendor_b",
+#define NUM_PARTITIONS 0//4
+const char* partitions_to_check[] = {	// NOTE: Filesystems of the provided partitions MUST be EXT4 or F2FS.
+	//"system_a",
+	//"system_b",
+	//"vendor_a",
+	//"vendor_b",
 };
 
-#define NUM_NONFS_PARTITIONS 2
-const char* nonfs_partitions_to_check[] = {	// These partitions don't have an EXT4 filesystem, so we check them in their entirety.
-	"boot_a",
-	"boot_b",
+#define NUM_NONFS_PARTITIONS 0//2
+const char* nonfs_partitions_to_check[] = {	// These partitions don't have a valid filesystem, so we check them in their entirety.
+	//"boot_a",
+	//"boot_b",
 };
 
 
@@ -257,6 +257,7 @@ int ReceiveFileMetaAndHash(int descFD, int epInID, struct file_metadata* fm, uns
 	size_t i;
 	EVP_MD_CTX* ctx;
 
+	// TODO: In the case of symlinks, also receive and check the destination.
 	if ( ReadFromDevice(descFD, epInID, responseMetadata, 1 + sizeof(struct file_metadata)) < 0 )
 		return -1;
 
@@ -303,6 +304,7 @@ int ReceiveFileMetaAndHash(int descFD, int epInID, struct file_metadata* fm, uns
 		printf("!! Error receiving data for %s: %s !!\n", fm->filepath, GetErrorString(responseFileBlock[0]));
 		return -1;
 	}
+	// TODO: Add S_ISBLK(fm->mode) as a check. Putting a TODO here because I'll need to test this.
 	if ( S_ISREG(fm->mode) && bytesReadTotal != fileSize )	// Should never happen, but let's try to detect premature termination.
 	{
 		printf("!! Mismatch between stated file size (%lu) and bytes received (%lu) !!\n", fileSize, bytesReadTotal);
@@ -416,6 +418,7 @@ int main(int argc, char** argv)
 	int descFD;
 	int ifID, epInID, epOutID;
 
+	char getPartsCmd[1];
 	char curMetadataFile[NAME_MAX];
 	int metadataFileFD;
 	const char* metadataFileAddr;
@@ -514,6 +517,7 @@ int main(int argc, char** argv)
 			break;
 		}
 	}
+	closedir(dirPtr);
 
 	// Open the USB device for reading and writing, and get the descriptor.
 	descFD = open(devPath, O_RDWR);
@@ -540,7 +544,15 @@ int main(int argc, char** argv)
 
 	// == FILE VERIFICATION ==
 
-	printf("\n-- Checking metadata and hashes of files in block devices with EXT4 filesystems... --\n");
+	// If no partitions have been specified, send the command to print them out.
+	if ( NUM_PARTITIONS == 0 && NUM_NONFS_PARTITIONS == 0 )
+	{
+		printf("-- No partitions specified - see device screen for list --\n");
+		getPartsCmd[0] = CMD_GET_PARTS;
+		WriteToDevice(descFD, epOutID, getPartsCmd, 1);
+	}
+
+	printf("\n-- Checking metadata and hashes of files in block devices with EXT4/F2FS filesystems... --\n");
 	for ( i = 0; i < NUM_PARTITIONS; i++ )
 	{
 		printf("\n==== %s ====\n", partitions_to_check[i]);
@@ -668,6 +680,14 @@ int main(int argc, char** argv)
 					fm_trusted->selinuxContext, fm.selinuxContext);
 				bDataMismatch = 1;
 			}
+			if ( fm_trusted->symlinkDestLen > 0
+				&& strncmp(fm_trusted->symlinkDest, fm.symlinkDest, fm_trusted->symlinkDestLen) != 0 )
+			{
+				printf("!! %s: SYMLINK DESTINATION MISMATCH !!\n", curFileRequest);
+				printf("!!\tstored: %s\t!!\n", fm_trusted->symlinkDest);
+				printf("!!\treceived: %s\t!!\n", fm.symlinkDest);
+				bDataMismatch = 1;
+			}
 			// Now, compare the file hashes.
 			if ( memcmp(digest_trusted, digest, HASHLEN) != 0 )
 			{
@@ -694,7 +714,7 @@ int main(int argc, char** argv)
 
 	// == BLOCK DEVICE VERIFICATION ==
 
-	printf("\n-- Checking hashes of partitions lacking EXT4 filesystems... --\n");
+	printf("\n-- Checking hashes of partitions lacking EXT4/F2FS filesystems... --\n");
 	for ( i = 0; i < NUM_NONFS_PARTITIONS; i++ )
 	{
 		printf("\n==== %s ====\n", nonfs_partitions_to_check[i]);
