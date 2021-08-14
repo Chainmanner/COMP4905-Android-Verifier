@@ -344,6 +344,9 @@ int main(int argc, char** argv)
 	android::base::WaitForProperty("sys.usb.state", "VERIFIER");
 	ui->Print(" FunctionFS set up\n\n");
 
+	// FIXME: NOT YET DONE
+	PerformECDHEKeyExchange(ui);
+
 	// Device-side verifier loop. Receives and executes commands from the host.
 	// TODO: Comms have no encryption or verification. Implement that!
 	ui->Print(" Ready to receive commands...\n\n");

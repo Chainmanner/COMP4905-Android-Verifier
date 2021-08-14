@@ -19,6 +19,7 @@
 
 #include <openssl/sha.h>
 #include <openssl/evp.h>
+#include <openssl/ec.h>
 
 #include "verifier_constants.h"
 
@@ -121,6 +122,72 @@ ssize_t WriteToDevice(int descFD, int epOutID, const void* outBuf, size_t numByt
 	}
 
 	return bytesWrittenTotal;
+}
+
+int PerformECDHEKeyExchange(int descFD, int epInID, int epOutID)
+{
+	// TODO: Station-to-Station protocol is NYI; this is only a test to see if ECDHE works.
+
+        EVP_PKEY_CTX* keygenCTX;
+        EVP_PKEY_CTX* deriveCTX;
+        EVP_PKEY* pubkey = NULL;
+        unsigned char* pubkey_char = NULL;
+        size_t pubkey_char_len;
+	unsigned char devkey_char[32];
+        EVP_PKEY* devicekey;
+        unsigned char* sharedSecret;
+	size_t sharedSecretLen;
+
+	// Create the key generation context.
+	keygenCTX = EVP_PKEY_CTX_new_id(NID_X25519, NULL);
+	if ( keygenCTX == NULL )
+		return -1;
+
+	// Initialize the key generation context, then generate the keypair.
+	if ( EVP_PKEY_keygen_init(keygenCTX) != 1 )
+		return -1;
+	if ( EVP_PKEY_keygen(keygenCTX, &pubkey) != 1 )
+		return -1;
+
+	// Get the public part of the keypair, so that we can transmit it.
+	EVP_PKEY_get_raw_public_key(pubkey, NULL, &pubkey_char_len);
+	pubkey_char = (unsigned char*)malloc(pubkey_char_len * sizeof(char));
+	if ( pubkey_char == NULL )
+		return -1;
+	EVP_PKEY_get_raw_public_key(pubkey, pubkey_char, &pubkey_char_len);
+
+	// Send our public key, then receive the device's public key.
+	WriteToDevice(descFD, epOutID, pubkey_char, 32);
+	ReadFromDevice(descFD, epInID, devkey_char, 32);
+	devicekey = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, NULL, devkey_char, 32);
+	if ( devicekey == NULL )
+		return -1;
+
+	// Initialize the shared secret derivation context, set the peer's public key, then get the length of the shared secret.
+	deriveCTX = EVP_PKEY_CTX_new(pubkey, NULL);
+	if ( deriveCTX == NULL )
+		return -1;
+	if ( EVP_PKEY_derive_init(deriveCTX) != 1 )
+		return -1;
+	if ( EVP_PKEY_derive_set_peer(deriveCTX, devicekey) != 1 )
+		return -1;
+	if ( EVP_PKEY_derive(deriveCTX, NULL, &sharedSecretLen) != 1 )
+		return -1;
+
+	// Derive the shared secret.
+	sharedSecret = malloc(sharedSecretLen);
+	if ( sharedSecret == NULL )
+		return -1;
+	if ( EVP_PKEY_derive(deriveCTX, sharedSecret, &sharedSecretLen) != 1 )
+		return -1;
+
+	printf("Shared secret: ");
+	for ( int i = 0; i < sharedSecretLen; i++ )
+		printf("%02x", sharedSecret[i]);
+	printf("\n");
+
+	// TODO: Free all that was allocated, except for the shared secret.
+	return 0;
 }
 
 // Gets the string that corresponds to an error response byte.
@@ -541,6 +608,10 @@ int main(int argc, char** argv)
 		close(descFD);
 		return -1;
 	}
+
+	// FIXME: NOT YET DONE
+	PerformECDHEKeyExchange(descFD, epInID, epOutID);
+	return 666;
 
 	// == FILE VERIFICATION ==
 

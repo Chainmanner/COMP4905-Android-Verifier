@@ -13,7 +13,15 @@
 
 #include <android-base/properties.h>
 
+#include <openssl/evp.h>
+#include <openssl/curve25519.h>
+
 #include "verifier_constants.h"
+
+// FIXME: TEST CODE
+#include "recovery_ui/device.h"
+#include "recovery_ui/stub_ui.h"
+#include "recovery_ui/ui.h"
 
 
 // == DEFINITIONS ==
@@ -255,4 +263,31 @@ ssize_t WriteToHost(const void* outBuf, size_t iNumBytes)
 	}
 	return bytesWrittenTotal;
 	//return write(iOutFD, outBuf, iNumBytes);
+}
+
+bool PerformECDHEKeyExchange(RecoveryUI* ui)	// FIXME: RecoveryUI is for testing.
+{
+	// FIXME: Station-to-Station protocol is NYI; this is only a test to see if ECDHE works.
+
+	unsigned char pubkey[32];
+	unsigned char privkey[32];
+	unsigned char hostkey[32];
+	unsigned char sharedkey[32];
+
+	// BoringSSL provides an easy way to generate X25519 keypairs.
+	X25519_keypair(pubkey, privkey);
+
+	// Receive the verifier's public key, then send the recovery's.
+	ReadFromHost(hostkey, 32);
+	WriteToHost(pubkey, 32);
+
+	X25519(sharedkey, privkey, hostkey);
+
+	// FIXME: TEST CODE
+	ui->Print("Shared secret: ");
+	for ( int i = 0; i < 32; i++ )
+		ui->Print("%02x", sharedkey[i]);
+	ui->Print("\n");
+
+	return false;	// TODO
 }
