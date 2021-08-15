@@ -14,7 +14,11 @@
 #include <android-base/properties.h>
 
 #include <openssl/evp.h>
+#include <openssl/aead.h>
+#include <openssl/chacha.h>
 #include <openssl/curve25519.h>
+#include <openssl/hmac.h>
+#include <openssl/sha.h>
 
 #include "verifier_constants.h"
 
@@ -24,10 +28,8 @@
 #include "recovery_ui/ui.h"
 
 
-// == DEFINITIONS ==
+// == PREPROCESSOR DEFS ==
 
-
-// Preprocessor defs
 #define FS_MAX_PACKET_SIZE 64
 #define HS_MAX_PACKET_SIZE 512
 #define SS_MAX_PACKET_SIZE 1024
@@ -37,6 +39,8 @@
 #define CONTROL_PATH "/dev/usb-ffs/VERIFIER/ep0"
 #define OUT_PATH "/dev/usb-ffs/VERIFIER/ep1"
 #define IN_PATH "/dev/usb-ffs/VERIFIER/ep2"
+
+#define RECOVERY_ED25519_PRIVKEY "\xc9\x67\xcf\x1f\xab\x98\xdb\x78\x6d\x44\x4d\xfb\x1f\x72\x03\x75\xbe\xe9\x9c\xad\x2f\xac\x27\xf3\xd6\xe1\xac\x4f\xb4\x0e\x62\x8f"
 
 
 // USB interface descriptor.
@@ -265,6 +269,66 @@ ssize_t WriteToHost(const void* outBuf, size_t iNumBytes)
 	//return write(iOutFD, outBuf, iNumBytes);
 }
 
+// Encrypts the plaintext using ChaCha20, then generates an HMAC-SHA256 tag for the ciphertext.
+// NOTE: encryptKey and macKey must both be 32 bytes (256 bits).
+// NOTE: ciphertext is dynamically allocated. Don't forget to free() it.
+// FIXME: In the event of failure, I need to free up used resources.
+bool EncryptThenMAC(const unsigned char* plaintext, int plaintextLen, const unsigned char* encryptKey, const unsigned char* macKey,
+			unsigned char** ciphertext, int &ciphertextLen)
+{
+	unsigned char nonce[12];
+	int randomFD;
+
+	// Read some random bytes in for the nonce, which by definition cannot be re-used.
+	randomFD = open("/dev/random", O_RDONLY);
+	read(randomFD, nonce, 12);
+	close(randomFD);
+
+	// Allocate space for the ciphertext, then encrypt the plaintext using ChaCha20 and the encryption key.
+	// Don't forget to also prefix the ciphertext with the nonce.
+	ciphertextLen = 12 + plaintextLen + 32;
+	*ciphertext = (unsigned char*)malloc( ciphertextLen );
+	if ( *ciphertext == NULL )
+		return false;
+	memcpy(*ciphertext, nonce, 12);
+	CRYPTO_chacha_20(*ciphertext + 12, plaintext, plaintextLen, encryptKey, nonce, 0);
+
+	// Generate the MAC tag.
+	if ( HMAC(EVP_sha256(), macKey, 32, *ciphertext + 12, plaintextLen, *ciphertext + (ciphertextLen - 32), NULL) == NULL )
+		return false;
+
+	return true;
+}
+
+// Checks the HMAC-SHA256 tag, then decrypts the ciphertext using ChaCha20.
+// NOTE: encryptKey and macKey must both be 32 bytes (256 bits).
+// NOTE: plaintext is dynamically allocated. Don't forget to free() it.
+// FIXME: In the event of failure, I need to free up used resources.
+bool MACThenDecrypt(const unsigned char* ciphertext, int ciphertextLen, const unsigned char* encryptKey, const unsigned char* macKey,
+			unsigned char** plaintext, int &plaintextLen)
+{
+	unsigned char nonce[12];
+	unsigned char reconstructed_hmac[32];
+	// TODO: Should use pointers to the full ciphertext to reference certain parts (nonce, ciphertext itself, MAC tag).
+
+	plaintextLen = ciphertextLen - 12 - 32;
+
+	// Check the HMAC.
+	if ( HMAC(EVP_sha256(), macKey, 32, ciphertext + 12, plaintextLen, reconstructed_hmac, NULL) == NULL )
+		return false;
+	if ( memcmp(reconstructed_hmac, ciphertext + (ciphertextLen - 32), 32) != 0 )
+		return false;
+
+	// HMAC checks out, so decrypt the ciphertext.
+	*plaintext = (unsigned char*)malloc( plaintextLen );
+	if ( *plaintext == NULL )
+		return false;
+	memcpy(nonce, ciphertext, 12);
+	CRYPTO_chacha_20(*plaintext, ciphertext + 12, plaintextLen, encryptKey, nonce, 0);
+
+	return true;
+}
+
 bool PerformECDHEKeyExchange(RecoveryUI* ui)	// FIXME: RecoveryUI is for testing.
 {
 	// FIXME: Station-to-Station protocol is NYI; this is only a test to see if ECDHE works.
@@ -280,6 +344,9 @@ bool PerformECDHEKeyExchange(RecoveryUI* ui)	// FIXME: RecoveryUI is for testing
 	// Receive the verifier's public key, then send the recovery's.
 	ReadFromHost(hostkey, 32);
 	WriteToHost(pubkey, 32);
+	// TODO: Concatenate the recovery's public key with the verifier's public key, sign the string, then send it encrypted along
+	//	 with the public key.
+	// TODO: Receive and verify the encrypted signature of the verifier's public key concatenated with the recovery's public key.
 
 	X25519(sharedkey, privkey, hostkey);
 
@@ -289,5 +356,26 @@ bool PerformECDHEKeyExchange(RecoveryUI* ui)	// FIXME: RecoveryUI is for testing
 		ui->Print("%02x", sharedkey[i]);
 	ui->Print("\n");
 
-	return false;	// TODO
+	// FIXME: TEST CODE (obviously, as you can tell by the bad practices involving the shared secret)
+	const unsigned char* plaintext = (unsigned char*)"wow such chacha20, very hmac-sha256";
+	unsigned char* ciphertext = NULL;
+	int ciphertextLen;
+	unsigned char* plaintext_from_decryption = NULL;
+	int plaintextLen;
+	ui->Print("%d", EncryptThenMAC(plaintext, strlen((const char*)plaintext)+1, sharedkey, sharedkey, &ciphertext, ciphertextLen));
+	ui->Print("%d\n", MACThenDecrypt(ciphertext, ciphertextLen, sharedkey, sharedkey, &plaintext_from_decryption, plaintextLen));
+	ui->Print("%d %d\n", ciphertextLen, plaintextLen);
+	ui->Print("Original plaintext:  %s\n", plaintext);
+	ui->Print("Decrypted plaintext: %s\n", plaintext_from_decryption);
+	WriteToHost(ciphertext, 12 + 36 + 32);
+	unsigned char recv_ciphertext[12 + 45 + 32];
+	unsigned char* recv_plaintext = NULL;
+	int recv_plaintextLen;
+	ReadFromHost(recv_ciphertext, 12 + 45 + 32);
+	MACThenDecrypt(recv_ciphertext, 12 + 45 + 32, sharedkey, sharedkey, &recv_plaintext, recv_plaintextLen);
+	ui->Print("received = %s\n", recv_plaintext);
+
+	// TODO
+
+	return true;
 }

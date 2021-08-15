@@ -18,6 +18,14 @@
 #define IN_ADDR (1 | USB_DIR_IN)	// NOTE: "In" from the host's perspective.
 #define OUT_ADDR (1 | USB_DIR_OUT)	// NOTE: "Out" from the host's perspective.
 
+// Comms Security
+#define SECURE_USB_COMMS	// Comment this out to disable encryption and authentication for USB comms.
+// NOTE: Keys generating using "openssl genpkey -text -algorithm ed25519". See the corresponding source files for the private keys.
+// FIXME: I know configurations are hardcoded, but this doesn't seem like a great idea. Maybe keep the public/private keys in separate
+//	  files? And have a script to regenerate keys?
+#define VERIFIER_ED25519_PUBKEY "\x13\x08\xc5\x80\xc7\x84\xa9\x1f\x6c\x5d\x2b\x95\x1e\x34\x32\x41\xa4\x97\x39\x63\x24\xd7\x1a\xef\x19\x15\x39\x0b\x89\x6e\x50\x79"
+#define RECOVERY_ED25519_PUBKEY "\x5a\xf8\x16\x1d\x67\x7d\x37\x91\x93\xd4\x48\xa3\x8b\x29\x02\x07\xec\xe8\x7b\x25\xaa\x52\xd8\x04\x08\x0c\xa0\x8a\xe0\x7e\x45\x70"
+
 // Commands
 #define CMD_GET_PARTS			0x9d
 #define CMD_MNT_DEV			0xbd

@@ -17,9 +17,10 @@
 #include <linux/usbdevice_fs.h>
 #include <linux/usb/ch9.h>
 
-#include <openssl/sha.h>
 #include <openssl/evp.h>
 #include <openssl/ec.h>
+#include <openssl/hmac.h>
+#include <openssl/sha.h>
 
 #include "verifier_constants.h"
 
@@ -33,6 +34,8 @@
 
 #define USB_TRANSFER_LIMIT (16 * 1024)
 #define TIMEOUT 0
+
+#define VERIFIER_ED25519_PRIVKEY "\xb3\x08\x48\x7f\xee\xa3\x8f\xeb\xda\x47\xf9\x64\xfb\xe4\x9c\x85\xdf\xa4\xeb\xdb\xb2\x38\x34\x1d\xe6\xc0\xde\x87\x09\x4b\x80\x39"
 
 #define HASHFUNC EVP_blake2b512()	// The hash function to use.
 #define HASHLEN 64			// The length of the hash function's digest in BYTES.
@@ -124,6 +127,109 @@ ssize_t WriteToDevice(int descFD, int epOutID, const void* outBuf, size_t numByt
 	return bytesWrittenTotal;
 }
 
+// TODO: Describe this.
+// NOTE: encryptKey and macKey must both be 32 bytes (256 bits).
+// NOTE: ciphertext is dynamically allocated. Don't forget to free() it.
+int EncryptThenMAC(const unsigned char* plaintext, int plaintextLen, const unsigned char* encryptKey, const unsigned char* macKey,
+			unsigned char** ciphertext, int* ciphertextLen)
+{
+	unsigned char iv[16];	// IV consists of initial block counter (= zero) in little-endian, followed by a random nonce.
+	int randomFD;
+	EVP_CIPHER_CTX* chachaCTX;
+	int actualCiphertextLen;	// Just a filler variable. Ciphertext length must be equal to the plaintext length.
+	int filler;
+
+	// Read some random bytes in for the nonce, which by definition cannot be re-used.
+	// Then, set the initial counter to zero.
+	randomFD = open("/dev/random", O_RDONLY);
+	read(randomFD, iv + 4, 12);
+	close(randomFD);
+	*(uint32_t*)(iv) = 0;
+
+	// Create the encryption context and initialize it.
+	chachaCTX = EVP_CIPHER_CTX_new();
+	if ( chachaCTX == NULL )
+		goto error;
+	if ( EVP_EncryptInit_ex(chachaCTX, EVP_chacha20(), NULL, encryptKey, iv) != 1 )
+		goto error;
+	EVP_CIPHER_CTX_set_padding(chachaCTX, 0);	// Disable padding. It's a stream cipher.
+
+	// Allocate memory for the full ciphertext, then encrypt the data.
+	*ciphertextLen = 12 + plaintextLen + 32;
+	*ciphertext = malloc( *ciphertextLen );
+	if ( *ciphertext == NULL )
+		goto error;
+	memcpy(*ciphertext, iv + 4, 12);
+	if ( EVP_EncryptUpdate(chachaCTX, *ciphertext + 12, &actualCiphertextLen, plaintext, plaintextLen) != 1 )
+		goto error;
+
+	// Just a matter of formalities; no more data should be written at all.
+	if ( EVP_EncryptFinal_ex(chachaCTX, *ciphertext + actualCiphertextLen, &filler) != 1 )
+		goto error;
+
+	// Generate the MAC tag.
+	if ( HMAC(EVP_sha256(), macKey, 32, *ciphertext + 12, plaintextLen, *ciphertext + (*ciphertextLen - 32), NULL) == NULL )
+		goto error;
+
+	EVP_CIPHER_CTX_free(chachaCTX);
+	return 0;
+
+	error:
+	free(*ciphertext);
+	EVP_CIPHER_CTX_free(chachaCTX);
+	return -1;
+}
+
+// TODO: Describe this.
+// NOTE: encryptKey and macKey must both be 32 bytes (256 bits).
+// NOTE: ciphertext is dynamically allocated. Don't forget to free() it.
+int MACThenDecrypt(const unsigned char* ciphertext, int ciphertextLen, const unsigned char* encryptKey, const unsigned char* macKey,
+			unsigned char** plaintext, int* plaintextLen)
+{
+	unsigned char reconstructed_hmac[32];
+	unsigned char iv[16];
+	EVP_CIPHER_CTX* chachaCTX;
+	int actualPlaintextLen;
+	int filler;
+
+	*plaintextLen = ciphertextLen - 12 - 32;
+
+	// Check the HMAC.
+	if ( HMAC(EVP_sha256(), macKey, 32, ciphertext + 12, *plaintextLen, reconstructed_hmac, NULL) == NULL )
+		goto error;
+
+	// HMAC check out. Set the IV.
+	*(uint32_t*)(iv) = 0;
+	memcpy(iv + 4, ciphertext, 12);
+
+	chachaCTX = EVP_CIPHER_CTX_new();
+	if ( chachaCTX == NULL )
+		goto error;
+	if ( EVP_DecryptInit_ex(chachaCTX, EVP_chacha20(), NULL, encryptKey, iv) != 1 )
+		goto error;
+	EVP_CIPHER_CTX_set_padding(chachaCTX, 0);	// Disable padding. It's a stream cipher.
+
+	// Allocate memory for the plaintext, then decrypt the ciphertext.
+	*plaintext = malloc( *plaintextLen );
+	if ( *plaintext == NULL )
+		goto error;
+	if ( EVP_DecryptUpdate(chachaCTX, *plaintext, &actualPlaintextLen, ciphertext + 12, *plaintextLen) != 1 )
+		goto error;
+
+	// Just a matter of formalities; no more data should be written at all.
+	if ( EVP_DecryptFinal_ex(chachaCTX, *plaintext + actualPlaintextLen, &filler) != 1 )
+		goto error;
+
+	EVP_CIPHER_CTX_free(chachaCTX);
+	return 0;
+
+	error:
+	free(*plaintext);
+	EVP_CIPHER_CTX_free(chachaCTX);
+	return -1;
+}
+
+// FIXME: In the event of an error, I need to free what was allocated.
 int PerformECDHEKeyExchange(int descFD, int epInID, int epOutID)
 {
 	// TODO: Station-to-Station protocol is NYI; this is only a test to see if ECDHE works.
@@ -131,7 +237,7 @@ int PerformECDHEKeyExchange(int descFD, int epInID, int epOutID)
         EVP_PKEY_CTX* keygenCTX;
         EVP_PKEY_CTX* deriveCTX;
         EVP_PKEY* pubkey = NULL;
-        unsigned char* pubkey_char = NULL;
+        unsigned char pubkey_char[32];
         size_t pubkey_char_len;
 	unsigned char devkey_char[32];
         EVP_PKEY* devicekey;
@@ -151,17 +257,22 @@ int PerformECDHEKeyExchange(int descFD, int epInID, int epOutID)
 
 	// Get the public part of the keypair, so that we can transmit it.
 	EVP_PKEY_get_raw_public_key(pubkey, NULL, &pubkey_char_len);
-	pubkey_char = (unsigned char*)malloc(pubkey_char_len * sizeof(char));
+	if ( pubkey_char_len != 32 )
+		return -1;
 	if ( pubkey_char == NULL )
 		return -1;
 	EVP_PKEY_get_raw_public_key(pubkey, pubkey_char, &pubkey_char_len);
 
 	// Send our public key, then receive the device's public key.
+	// FIXME: Need to use STS for authentication.
 	WriteToDevice(descFD, epOutID, pubkey_char, 32);
 	ReadFromDevice(descFD, epInID, devkey_char, 32);
+	// TODO: Receive ECDHE public key, along with encrypted signature of the device's public key concatenated with the host's key.
+	// TODO: Verify the signature.
 	devicekey = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, NULL, devkey_char, 32);
 	if ( devicekey == NULL )
 		return -1;
+	// TODO: Send the encrypted signature of the verifier's public key concatenated with the device's public key.
 
 	// Initialize the shared secret derivation context, set the peer's public key, then get the length of the shared secret.
 	deriveCTX = EVP_PKEY_CTX_new(pubkey, NULL);
@@ -181,12 +292,36 @@ int PerformECDHEKeyExchange(int descFD, int epInID, int epOutID)
 	if ( EVP_PKEY_derive(deriveCTX, sharedSecret, &sharedSecretLen) != 1 )
 		return -1;
 
+	// FIXME: TEST CODE
 	printf("Shared secret: ");
 	for ( int i = 0; i < sharedSecretLen; i++ )
 		printf("%02x", sharedSecret[i]);
 	printf("\n");
 
-	// TODO: Free all that was allocated, except for the shared secret.
+	// FIXME: TEST CODE (good thing, because I'm doing something you should never do in production down below)
+	const unsigned char* plaintext = (unsigned char*)"such confidentiality, very authenticity, wow";
+	printf("%d\n", strlen((const char*)plaintext));
+	unsigned char* ciphertext = NULL;
+	int ciphertextLen;
+	unsigned char* plaintext_from_decryption = NULL;
+	int plaintextLen;
+	printf("%d ", EncryptThenMAC(plaintext, strlen((const char*)plaintext)+1, sharedSecret, sharedSecret, &ciphertext, &ciphertextLen));
+	//printf("%d\n", MACThenDecrypt(ciphertext, ciphertextLen, sharedSecret, sharedSecret, &plaintext_from_decryption, &plaintextLen));
+	printf("plaintext = %s\n", plaintext);
+	//printf("decrypted = %s\n", plaintext_from_decryption);
+	unsigned char recv_ciphertext[12 + 36 + 32];
+	unsigned char* recv_plaintext = NULL;
+	int recv_plaintextLen;
+	ReadFromDevice(descFD, epInID, recv_ciphertext, 12 + 36 + 32);
+	MACThenDecrypt(recv_ciphertext, 12 + 36 + 32, sharedSecret, sharedSecret, &recv_plaintext, &recv_plaintextLen);
+	printf("received = %s\n", recv_plaintext);
+	WriteToDevice(descFD, epOutID, ciphertext, 12 + 45 + 32);
+
+	// TODO: Perhaps also clear the memory used before freeing it.
+	EVP_PKEY_CTX_free(keygenCTX);
+	EVP_PKEY_CTX_free(deriveCTX);
+	EVP_PKEY_free(pubkey);
+	EVP_PKEY_free(devicekey);
 	return 0;
 }
 
@@ -519,6 +654,7 @@ int main(int argc, char** argv)
 		if ( curDirEnt == NULL )
 		{
 			printf("!! Verifier (vendor ID %X, product ID %X) not found !!\n", VERIFIER_VENDOR, VERIFIER_PRODUCT);
+			closedir(dirPtr);
 			return -1;
 		}
 
