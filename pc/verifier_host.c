@@ -5,8 +5,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
-#include <readline/readline.h>
-#include <readline/history.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -20,6 +18,7 @@
 #include <openssl/evp.h>
 #include <openssl/ec.h>
 #include <openssl/hmac.h>
+#include <openssl/kdf.h>
 #include <openssl/sha.h>
 
 #include "verifier_constants.h"
@@ -35,23 +34,23 @@
 #define USB_TRANSFER_LIMIT (16 * 1024)
 #define TIMEOUT 0
 
-#define VERIFIER_ED25519_PRIVKEY "\xb3\x08\x48\x7f\xee\xa3\x8f\xeb\xda\x47\xf9\x64\xfb\xe4\x9c\x85\xdf\xa4\xeb\xdb\xb2\x38\x34\x1d\xe6\xc0\xde\x87\x09\x4b\x80\x39"
+#define VERIFIER_ED25519_PRIVKEY (unsigned char*)"\xb3\x08\x48\x7f\xee\xa3\x8f\xeb\xda\x47\xf9\x64\xfb\xe4\x9c\x85\xdf\xa4\xeb\xdb\xb2\x38\x34\x1d\xe6\xc0\xde\x87\x09\x4b\x80\x39"
 
 #define HASHFUNC EVP_blake2b512()	// The hash function to use.
 #define HASHLEN 64			// The length of the hash function's digest in BYTES.
 
-#define NUM_PARTITIONS 0//4
+#define NUM_PARTITIONS 4
 const char* partitions_to_check[] = {	// NOTE: Filesystems of the provided partitions MUST be EXT4 or F2FS.
-	//"system_a",
-	//"system_b",
-	//"vendor_a",
-	//"vendor_b",
+	"system_a",
+	"system_b",
+	"vendor_a",
+	"vendor_b",
 };
 
-#define NUM_NONFS_PARTITIONS 0//2
+#define NUM_NONFS_PARTITIONS 2
 const char* nonfs_partitions_to_check[] = {	// These partitions don't have a valid filesystem, so we check them in their entirety.
-	//"boot_a",
-	//"boot_b",
+	"boot_a",
+	"boot_b",
 };
 
 
@@ -59,7 +58,11 @@ const char* nonfs_partitions_to_check[] = {	// These partitions don't have a val
 
 // Reads at most numBytes from the device into inBuf.
 // Returns the number of bytes read, or -1 if an error occurred (and also prints the error).
+#ifdef SECURE_USB_COMMS
+ssize_t ReadFromDevice_plain(int descFD, int epInID, void* inBuf, size_t numBytes)
+#else
 ssize_t ReadFromDevice(int descFD, int epInID, void* inBuf, size_t numBytes)
+#endif
 {
 	char* inBuf_curPtr = (char*)inBuf;
 	size_t bytesLeftToRead = numBytes;
@@ -94,7 +97,11 @@ ssize_t ReadFromDevice(int descFD, int epInID, void* inBuf, size_t numBytes)
 
 // Writes at most numBytes from outBuf to the device.
 // Returns the number of bytes written, or -1 if an error occurred (and also prints the error).
+#ifdef SECURE_USB_COMMS
+ssize_t WriteToDevice_plain(int descFD, int epOutID, const void* outBuf, size_t numBytes)
+#else
 ssize_t WriteToDevice(int descFD, int epOutID, const void* outBuf, size_t numBytes)
+#endif
 {
 	char* outBuf_curPtr = (char*)outBuf;
 	size_t bytesLeftToWrite = numBytes;
@@ -127,6 +134,8 @@ ssize_t WriteToDevice(int descFD, int epOutID, const void* outBuf, size_t numByt
 	return bytesWrittenTotal;
 }
 
+#ifdef SECURE_USB_COMMS
+
 // TODO: Describe this.
 // NOTE: encryptKey and macKey must both be 32 bytes (256 bits).
 // NOTE: ciphertext is dynamically allocated. Don't forget to free() it.
@@ -149,16 +158,22 @@ int EncryptThenMAC(const unsigned char* plaintext, int plaintextLen, const unsig
 	// Create the encryption context and initialize it.
 	chachaCTX = EVP_CIPHER_CTX_new();
 	if ( chachaCTX == NULL )
-		goto error;
+		return -1;
 	if ( EVP_EncryptInit_ex(chachaCTX, EVP_chacha20(), NULL, encryptKey, iv) != 1 )
-		goto error;
+	{
+		EVP_CIPHER_CTX_free(chachaCTX);
+		return -1;
+	}
 	EVP_CIPHER_CTX_set_padding(chachaCTX, 0);	// Disable padding. It's a stream cipher.
 
 	// Allocate memory for the full ciphertext, then encrypt the data.
 	*ciphertextLen = 12 + plaintextLen + 32;
 	*ciphertext = malloc( *ciphertextLen );
 	if ( *ciphertext == NULL )
-		goto error;
+	{
+		EVP_CIPHER_CTX_free(chachaCTX);
+		return -1;
+	}
 	memcpy(*ciphertext, iv + 4, 12);
 	if ( EVP_EncryptUpdate(chachaCTX, *ciphertext + 12, &actualCiphertextLen, plaintext, plaintextLen) != 1 )
 		goto error;
@@ -196,7 +211,7 @@ int MACThenDecrypt(const unsigned char* ciphertext, int ciphertextLen, const uns
 
 	// Check the HMAC.
 	if ( HMAC(EVP_sha256(), macKey, 32, ciphertext + 12, *plaintextLen, reconstructed_hmac, NULL) == NULL )
-		goto error;
+		return -1;
 
 	// HMAC check out. Set the IV.
 	*(uint32_t*)(iv) = 0;
@@ -229,101 +244,182 @@ int MACThenDecrypt(const unsigned char* ciphertext, int ciphertextLen, const uns
 	return -1;
 }
 
-// FIXME: In the event of an error, I need to free what was allocated.
+// Encryption and MAC keys. Must be 32 bytes long.
+// Stored globally for backward compatibility with the ReadFromDevice()/WriteToDevice() functions.
+unsigned char* g_encryptKey;
+unsigned char* g_macKey;
+
+// TODO: Describe this.
+// The operation fails if any of the data received fails to be verified.
 int PerformECDHEKeyExchange(int descFD, int epInID, int epOutID)
 {
-	// TODO: Station-to-Station protocol is NYI; this is only a test to see if ECDHE works.
-
         EVP_PKEY_CTX* keygenCTX;
-        EVP_PKEY_CTX* deriveCTX;
         EVP_PKEY* pubkey = NULL;
         unsigned char pubkey_char[32];
         size_t pubkey_char_len;
-	unsigned char devkey_char[32];
+
+	unsigned char recv_pubkey_encsig[32 + (12 + 64 + 32)];
         EVP_PKEY* devicekey;
+
+        EVP_PKEY_CTX* deriveCTX;
         unsigned char* sharedSecret;
 	size_t sharedSecretLen;
 
-	// Create the key generation context.
+	EVP_PKEY_CTX* enckeyCTX;
+	unsigned char encryptKey[32];
+	size_t encryptKeyLen = 32;
+	EVP_PKEY_CTX* mackeyCTX;
+	unsigned char macKey[32];
+	size_t macKeyLen = 32;
+
+	unsigned char* recv_sig;
+	int recv_sigLen;
+	unsigned char concatenated[64];
+	EVP_MD_CTX* verifyCTX;
+	EVP_PKEY* pubEd25519DevKey;
+
+	unsigned char concatenated2[64];
+	EVP_PKEY* privEd25519Key;
+	EVP_MD_CTX* signCTX;
+	unsigned char sig[64];
+	size_t sigLen = 64;
+	unsigned char* sig_enc;
+	int sig_encLen;
+
+	// Generate the keypair.
 	keygenCTX = EVP_PKEY_CTX_new_id(NID_X25519, NULL);
-	if ( keygenCTX == NULL )
-		return -1;
-
-	// Initialize the key generation context, then generate the keypair.
-	if ( EVP_PKEY_keygen_init(keygenCTX) != 1 )
-		return -1;
-	if ( EVP_PKEY_keygen(keygenCTX, &pubkey) != 1 )
-		return -1;
-
-	// Get the public part of the keypair, so that we can transmit it.
-	EVP_PKEY_get_raw_public_key(pubkey, NULL, &pubkey_char_len);
-	if ( pubkey_char_len != 32 )
-		return -1;
-	if ( pubkey_char == NULL )
-		return -1;
-	EVP_PKEY_get_raw_public_key(pubkey, pubkey_char, &pubkey_char_len);
-
-	// Send our public key, then receive the device's public key.
-	// FIXME: Need to use STS for authentication.
-	WriteToDevice(descFD, epOutID, pubkey_char, 32);
-	ReadFromDevice(descFD, epInID, devkey_char, 32);
-	// TODO: Receive ECDHE public key, along with encrypted signature of the device's public key concatenated with the host's key.
-	// TODO: Verify the signature.
-	devicekey = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, NULL, devkey_char, 32);
-	if ( devicekey == NULL )
-		return -1;
-	// TODO: Send the encrypted signature of the verifier's public key concatenated with the device's public key.
-
-	// Initialize the shared secret derivation context, set the peer's public key, then get the length of the shared secret.
-	deriveCTX = EVP_PKEY_CTX_new(pubkey, NULL);
-	if ( deriveCTX == NULL )
-		return -1;
-	if ( EVP_PKEY_derive_init(deriveCTX) != 1 )
-		return -1;
-	if ( EVP_PKEY_derive_set_peer(deriveCTX, devicekey) != 1 )
-		return -1;
-	if ( EVP_PKEY_derive(deriveCTX, NULL, &sharedSecretLen) != 1 )
-		return -1;
-
-	// Derive the shared secret.
-	sharedSecret = malloc(sharedSecretLen);
-	if ( sharedSecret == NULL )
-		return -1;
-	if ( EVP_PKEY_derive(deriveCTX, sharedSecret, &sharedSecretLen) != 1 )
-		return -1;
-
-	// FIXME: TEST CODE
-	printf("Shared secret: ");
-	for ( int i = 0; i < sharedSecretLen; i++ )
-		printf("%02x", sharedSecret[i]);
-	printf("\n");
-
-	// FIXME: TEST CODE (good thing, because I'm doing something you should never do in production down below)
-	const unsigned char* plaintext = (unsigned char*)"such confidentiality, very authenticity, wow";
-	printf("%d\n", strlen((const char*)plaintext));
-	unsigned char* ciphertext = NULL;
-	int ciphertextLen;
-	unsigned char* plaintext_from_decryption = NULL;
-	int plaintextLen;
-	printf("%d ", EncryptThenMAC(plaintext, strlen((const char*)plaintext)+1, sharedSecret, sharedSecret, &ciphertext, &ciphertextLen));
-	//printf("%d\n", MACThenDecrypt(ciphertext, ciphertextLen, sharedSecret, sharedSecret, &plaintext_from_decryption, &plaintextLen));
-	printf("plaintext = %s\n", plaintext);
-	//printf("decrypted = %s\n", plaintext_from_decryption);
-	unsigned char recv_ciphertext[12 + 36 + 32];
-	unsigned char* recv_plaintext = NULL;
-	int recv_plaintextLen;
-	ReadFromDevice(descFD, epInID, recv_ciphertext, 12 + 36 + 32);
-	MACThenDecrypt(recv_ciphertext, 12 + 36 + 32, sharedSecret, sharedSecret, &recv_plaintext, &recv_plaintextLen);
-	printf("received = %s\n", recv_plaintext);
-	WriteToDevice(descFD, epOutID, ciphertext, 12 + 45 + 32);
-
-	// TODO: Perhaps also clear the memory used before freeing it.
+	EVP_PKEY_keygen_init(keygenCTX);
+	EVP_PKEY_keygen(keygenCTX, &pubkey);
 	EVP_PKEY_CTX_free(keygenCTX);
+
+	// Send the verifier's public key, then receive the device's public key and an encrypted signature of (devkey || pubkey).
+	EVP_PKEY_get_raw_public_key(pubkey, NULL, &pubkey_char_len);
+	EVP_PKEY_get_raw_public_key(pubkey, pubkey_char, &pubkey_char_len);
+	WriteToDevice_plain(descFD, epOutID, pubkey_char, 32);
+	ReadFromDevice_plain(descFD, epInID, recv_pubkey_encsig, 32 + (12 + 64 + 32));
+
+	devicekey = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, NULL, recv_pubkey_encsig, 32);
+	// Initialize the shared secret derivation context, set the peer's public key, then get the length of the shared secret.
+	// Then actually derive the shared secret.
+	deriveCTX = EVP_PKEY_CTX_new(pubkey, NULL);
+	EVP_PKEY_derive_init(deriveCTX);
+	EVP_PKEY_derive_set_peer(deriveCTX, devicekey);
+	EVP_PKEY_derive(deriveCTX, NULL, &sharedSecretLen);
+	sharedSecret = malloc(sharedSecretLen);
+	EVP_PKEY_derive(deriveCTX, sharedSecret, &sharedSecretLen);
 	EVP_PKEY_CTX_free(deriveCTX);
+
+	// Derive the encryption key and MAC key, which cannot be equal since we're using encrypt-then-MAC.
+	// Encryption key - HKDF on the shared secret.
+	enckeyCTX = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, NULL);
+	EVP_PKEY_derive_init(enckeyCTX);
+	EVP_PKEY_CTX_set_hkdf_md(enckeyCTX, EVP_sha256());
+	EVP_PKEY_CTX_set1_hkdf_key(enckeyCTX, sharedSecret, sharedSecretLen);
+	EVP_PKEY_CTX_set1_hkdf_salt(enckeyCTX, HKDF_SALT, sizeof(HKDF_SALT));
+	EVP_PKEY_CTX_add1_hkdf_info(enckeyCTX, HKDF_INFO, sizeof(HKDF_INFO));
+	EVP_PKEY_derive(enckeyCTX, encryptKey, &encryptKeyLen);
+	EVP_PKEY_CTX_free(enckeyCTX);
+	// MAC key - HKDF on the encryption key.
+	mackeyCTX = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, NULL);
+	EVP_PKEY_derive_init(mackeyCTX);
+	EVP_PKEY_CTX_set_hkdf_md(mackeyCTX, EVP_sha256());
+	EVP_PKEY_CTX_set1_hkdf_key(mackeyCTX, encryptKey, encryptKeyLen);
+	EVP_PKEY_CTX_set1_hkdf_salt(mackeyCTX, HKDF_SALT, sizeof(HKDF_SALT));
+	EVP_PKEY_CTX_add1_hkdf_info(mackeyCTX, HKDF_INFO, sizeof(HKDF_INFO));
+	EVP_PKEY_derive(mackeyCTX, macKey, &macKeyLen);
+	EVP_PKEY_CTX_free(mackeyCTX);
+	free(sharedSecret);	// No longer need the shared secret now that we derived it.
+
+	// Decrypt the encrypted signature, concatenate (devkey || pubkey), and verify the signature.
+	if ( MACThenDecrypt(recv_pubkey_encsig + 32, 12 + 64 + 32, encryptKey, macKey, &recv_sig, &recv_sigLen) < 0 )
+	{
+		EVP_PKEY_free(pubkey);
+		EVP_PKEY_free(devicekey);
+		return -1;
+	}
+	memcpy(concatenated, recv_pubkey_encsig, 32);
+	memcpy(concatenated + 32, pubkey_char, 32);
+	pubEd25519DevKey = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, NULL, RECOVERY_ED25519_PUBKEY, 32);
+	verifyCTX = EVP_MD_CTX_new();
+	EVP_DigestVerifyInit(verifyCTX, NULL, NULL, NULL, pubEd25519DevKey);
+	if ( EVP_DigestVerify(verifyCTX, recv_sig, 64, concatenated, 64) != 1 )
+	{
+		EVP_PKEY_free(pubEd25519DevKey);
+		EVP_MD_CTX_free(verifyCTX);
+		EVP_PKEY_free(pubkey);
+		EVP_PKEY_free(devicekey);
+		free(recv_sig);
+		return -1;
+	}
+	EVP_MD_CTX_free(verifyCTX);
+	EVP_PKEY_free(pubEd25519DevKey);
+	free(recv_sig);
+
+	// Send the encrypted signature of the verifier's public key concatenated with the device's public key.
+	memcpy(concatenated2, pubkey_char, 32);
+	memcpy(concatenated2 + 32, recv_pubkey_encsig, 32);
+	privEd25519Key = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, NULL, VERIFIER_ED25519_PRIVKEY, 32);
+	signCTX = EVP_MD_CTX_new();
+	EVP_DigestSignInit(signCTX, NULL, NULL, NULL, privEd25519Key);
+	EVP_DigestSign(signCTX, sig, &sigLen, concatenated2, 64);
+	EVP_MD_CTX_free(signCTX);
+	EVP_PKEY_free(privEd25519Key);
+	EncryptThenMAC(sig, 64, encryptKey, macKey, &sig_enc, &sig_encLen);
+	WriteToDevice_plain(descFD, epOutID, sig_enc, 12 + 64 + 32);
+	free(sig_enc);
+
+	g_encryptKey = malloc(32);
+	g_macKey = malloc(32);
+	memcpy(g_encryptKey, encryptKey, 32);
+	memcpy(g_macKey, macKey, 32);
+
 	EVP_PKEY_free(pubkey);
 	EVP_PKEY_free(devicekey);
 	return 0;
 }
+
+// Similar to ReadFromDevice_plain(), but authenticates and decrypts the data when it's received.
+ssize_t ReadFromDevice(int descFD, int epInID, void* inBuf, size_t numBytes)
+{
+	unsigned char* ciphertext;
+	int ciphertextLen;
+	unsigned char* plaintext;
+	int plaintextLen;
+
+	ciphertext = malloc(12 + numBytes + 32);
+	ciphertextLen = ReadFromDevice_plain(descFD, epInID, ciphertext, 12 + numBytes + 32);
+	if ( ciphertextLen < 0 )
+		return -1;
+	if ( MACThenDecrypt(ciphertext, ciphertextLen, g_encryptKey, g_macKey, &plaintext, &plaintextLen) < 0 )
+	{
+		free(ciphertext);
+		return -1;
+	}
+
+	free(ciphertext);
+	memcpy(inBuf, plaintext, plaintextLen);
+	free(plaintext);
+	return plaintextLen;
+}
+
+// Similar to WriteToDevice_plain(), but encrypts and authenticates the data before it's sent.
+ssize_t WriteToDevice(int descFD, int epOutID, const void* outBuf, size_t numBytes)
+{
+	unsigned char* plaintext;
+	unsigned char* ciphertext;
+	int ciphertextLen;
+	int bytesWritten;
+
+	plaintext = (unsigned char*)outBuf;
+	if ( EncryptThenMAC(plaintext, numBytes, g_encryptKey, g_macKey, &ciphertext, &ciphertextLen) < 0 )
+		return -1;
+	bytesWritten = WriteToDevice_plain(descFD, epOutID, ciphertext, ciphertextLen);
+
+	free(ciphertext);
+	return bytesWritten;
+}
+
+#endif	// SECURE_USB_COMMS
 
 // Gets the string that corresponds to an error response byte.
 // Since you can't scroll through the device's log, this should be printed on the host's end in case the user misses something.
@@ -636,6 +732,8 @@ int main(int argc, char** argv)
 	int bDataMismatch;
 	int numMismatchedFiles;
 
+	char filler;
+
 	// == CODE ==
 
 	// First step is to find the device with the vendor and product IDs of the verifier.
@@ -745,9 +843,13 @@ int main(int argc, char** argv)
 		return -1;
 	}
 
-	// FIXME: NOT YET DONE
-	PerformECDHEKeyExchange(descFD, epInID, epOutID);
-	return 666;
+#ifdef SECURE_USB_COMMS
+	// Perform the ephemeral elliptic-curve Diffie-Hellman exchange.
+	if ( PerformECDHEKeyExchange(descFD, epInID, epOutID) < 0 )
+		printf("!! ECDHE key exchange failed --\n");
+	else
+		printf("-- ECDHE key exchange successful --\n");
+#endif
 
 	// == FILE VERIFICATION ==
 
@@ -1022,10 +1124,15 @@ int main(int argc, char** argv)
 	// == CLEANUP ==
 
 	printf("\n");
-	free(readline("-- Press ENTER to reboot device and exit --\n"));
+	printf("-- Press ENTER to reboot device and exit --\n");
+	scanf("%c", &filler);
 	RebootDevice(descFD, epOutID);
 	if ( ioctl(descFD, USBDEVFS_RELEASEINTERFACE, &ifID) < 0 )	// If this fails, continue anyway, but report the error.
 		printf("!! Unable to release USB interface %d: %s !!\n", ifID, strerror(errno));
+#ifdef SECURE_USB_COMMS
+	free(g_encryptKey);
+	free(g_macKey);
+#endif
 	close(descFD);
 	return 0;
 }

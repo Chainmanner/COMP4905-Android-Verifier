@@ -14,9 +14,9 @@
 #include <android-base/properties.h>
 
 #include <openssl/evp.h>
-#include <openssl/aead.h>
 #include <openssl/chacha.h>
 #include <openssl/curve25519.h>
+#include <openssl/hkdf.h>
 #include <openssl/hmac.h>
 #include <openssl/sha.h>
 
@@ -40,7 +40,7 @@
 #define OUT_PATH "/dev/usb-ffs/VERIFIER/ep1"
 #define IN_PATH "/dev/usb-ffs/VERIFIER/ep2"
 
-#define RECOVERY_ED25519_PRIVKEY "\xc9\x67\xcf\x1f\xab\x98\xdb\x78\x6d\x44\x4d\xfb\x1f\x72\x03\x75\xbe\xe9\x9c\xad\x2f\xac\x27\xf3\xd6\xe1\xac\x4f\xb4\x0e\x62\x8f"
+#define RECOVERY_ED25519_PRIVKEY (unsigned char*)"\xc9\x67\xcf\x1f\xab\x98\xdb\x78\x6d\x44\x4d\xfb\x1f\x72\x03\x75\xbe\xe9\x9c\xad\x2f\xac\x27\xf3\xd6\xe1\xac\x4f\xb4\x0e\x62\x8f"
 
 
 // USB interface descriptor.
@@ -179,6 +179,10 @@ int iControlFD;
 int iOutFD;
 int iInFD;
 
+// Encryption and MAC keys.
+unsigned char* g_encryptKey;
+unsigned char* g_macKey;
+
 
 // == FUNCTIONS ==
 
@@ -213,12 +217,20 @@ void CloseFunctionFS()
 	close(iControlFD);
 	close(iOutFD);
 	close(iInFD);
+#ifdef SECURE_USB_COMMS
+	free(g_encryptKey);
+	free(g_macKey);
+#endif
 }
 
 // Reads at most iNumBytes bytes from the host and store them in inBuf.
 // Returns either the number of bytes read, or -1 if an error occurred.
 // NOTE: If an error occurs, data may have still been read to inBuf.
+#ifdef SECURE_USB_COMMS
+ssize_t ReadFromHost_plain(void* inBuf, size_t iNumBytes)
+#else
 ssize_t ReadFromHost(void* inBuf, size_t iNumBytes)
+#endif
 {
 	char* inBuf_curPtr = (char*)inBuf;	// Must be char*; void* arithmetic not allowed.
 	size_t bytesLeftToRead = iNumBytes;
@@ -245,7 +257,11 @@ ssize_t ReadFromHost(void* inBuf, size_t iNumBytes)
 // Sends at most iNumBytes bytes from outBuf to the host.
 // Returns either the number of bytes written, or -1 if an error occurred (with errno set appropriately).
 // NOTE: If an error occurs, data from outBuf may have still been sent to the host.
+#ifdef SECURE_USB_COMMS
+ssize_t WriteToHost_plain(const void* outBuf, size_t iNumBytes)
+#else
 ssize_t WriteToHost(const void* outBuf, size_t iNumBytes)
+#endif
 {
 	char* outBuf_curPtr = (char*)outBuf;
 	size_t bytesLeftToWrite = iNumBytes;
@@ -269,10 +285,11 @@ ssize_t WriteToHost(const void* outBuf, size_t iNumBytes)
 	//return write(iOutFD, outBuf, iNumBytes);
 }
 
+#ifdef SECURE_USB_COMMS
+
 // Encrypts the plaintext using ChaCha20, then generates an HMAC-SHA256 tag for the ciphertext.
 // NOTE: encryptKey and macKey must both be 32 bytes (256 bits).
 // NOTE: ciphertext is dynamically allocated. Don't forget to free() it.
-// FIXME: In the event of failure, I need to free up used resources.
 bool EncryptThenMAC(const unsigned char* plaintext, int plaintextLen, const unsigned char* encryptKey, const unsigned char* macKey,
 			unsigned char** ciphertext, int &ciphertextLen)
 {
@@ -295,7 +312,10 @@ bool EncryptThenMAC(const unsigned char* plaintext, int plaintextLen, const unsi
 
 	// Generate the MAC tag.
 	if ( HMAC(EVP_sha256(), macKey, 32, *ciphertext + 12, plaintextLen, *ciphertext + (ciphertextLen - 32), NULL) == NULL )
+	{
+		free(*ciphertext);
 		return false;
+	}
 
 	return true;
 }
@@ -303,7 +323,6 @@ bool EncryptThenMAC(const unsigned char* plaintext, int plaintextLen, const unsi
 // Checks the HMAC-SHA256 tag, then decrypts the ciphertext using ChaCha20.
 // NOTE: encryptKey and macKey must both be 32 bytes (256 bits).
 // NOTE: plaintext is dynamically allocated. Don't forget to free() it.
-// FIXME: In the event of failure, I need to free up used resources.
 bool MACThenDecrypt(const unsigned char* ciphertext, int ciphertextLen, const unsigned char* encryptKey, const unsigned char* macKey,
 			unsigned char** plaintext, int &plaintextLen)
 {
@@ -329,53 +348,117 @@ bool MACThenDecrypt(const unsigned char* ciphertext, int ciphertextLen, const un
 	return true;
 }
 
-bool PerformECDHEKeyExchange(RecoveryUI* ui)	// FIXME: RecoveryUI is for testing.
+// TODO: Describe this.
+bool PerformECDHEKeyExchange()
 {
-	// FIXME: Station-to-Station protocol is NYI; this is only a test to see if ECDHE works.
-
 	unsigned char pubkey[32];
 	unsigned char privkey[32];
 	unsigned char hostkey[32];
-	unsigned char sharedkey[32];
+	unsigned char sharedsecret[32];
+
+	unsigned char encryptkey[32];
+	unsigned char mackey[32];
+
+	unsigned char concatenated[64];
+	unsigned char bothkeys[64];	// BoringSSL has Ed25519 private keys be suffixed with the corresponding public keys.
+	unsigned char concatenated_sig[64];
+	unsigned char* concatenated_sig_enc;
+	int concatenated_sig_enc_len;
+	unsigned char pubkey_encsig[32 + (12 + 64 + 32)];	// pubkey + concatenated_sig_enc
+
+	unsigned char recv_encsig[12 + 64 + 32];
+	unsigned char* recv_sig;
+	int recv_sig_len;
+	unsigned char concatenated2[64];
 
 	// BoringSSL provides an easy way to generate X25519 keypairs.
 	X25519_keypair(pubkey, privkey);
 
-	// Receive the verifier's public key, then send the recovery's.
-	ReadFromHost(hostkey, 32);
-	WriteToHost(pubkey, 32);
-	// TODO: Concatenate the recovery's public key with the verifier's public key, sign the string, then send it encrypted along
-	//	 with the public key.
-	// TODO: Receive and verify the encrypted signature of the verifier's public key concatenated with the recovery's public key.
+	// Receive the verifier's public key, then derive the shared secret.
+	ReadFromHost_plain(hostkey, 32);
+	X25519(sharedsecret, privkey, hostkey);
 
-	X25519(sharedkey, privkey, hostkey);
+	// Derive two keys from the shared secret, one for encryption and the other for the MAC.
+	// Since we're using encrypt-then-MAC, we should not use the same key for both the encryption and the MAC.
+	// For the encryption key, use HKDF on the shared secret. For the MAC key, use HKDF on the encryption key.
+	HKDF(encryptkey, 32, EVP_sha256(), sharedsecret, 32, HKDF_SALT, sizeof(HKDF_SALT), HKDF_INFO, sizeof(HKDF_INFO));
+	HKDF(mackey, 32, EVP_sha256(), encryptkey, 32, HKDF_SALT, sizeof(HKDF_SALT), HKDF_INFO, sizeof(HKDF_INFO));
 
-	// FIXME: TEST CODE
-	ui->Print("Shared secret: ");
-	for ( int i = 0; i < 32; i++ )
-		ui->Print("%02x", sharedkey[i]);
-	ui->Print("\n");
+	// Concatenate our public ECDHE key with that of the verifier.
+	memcpy(concatenated, pubkey, 32);
+	memcpy(concatenated + 32, hostkey, 32);
+	// Sign the concatenation.
+	memcpy(bothkeys, RECOVERY_ED25519_PRIVKEY, 32);
+	memcpy(bothkeys + 32, RECOVERY_ED25519_PUBKEY, 32);
+	ED25519_sign(concatenated_sig, concatenated, 64, bothkeys);
+	// Encrypt the signature (with authentication included).
+	EncryptThenMAC(concatenated_sig, 64, encryptkey, mackey, &concatenated_sig_enc, concatenated_sig_enc_len);
+	// Send the ECDHE public key and the encrypted + authenticated signature of (pubkey || hostkey) to the verifier.
+	memcpy(pubkey_encsig, pubkey, 32);
+	memcpy(pubkey_encsig + 32, concatenated_sig_enc, 12 + 64 + 32);
+	free(concatenated_sig_enc);
+	WriteToHost_plain(pubkey_encsig, 32 + (12 + 64 + 32));
 
-	// FIXME: TEST CODE (obviously, as you can tell by the bad practices involving the shared secret)
-	const unsigned char* plaintext = (unsigned char*)"wow such chacha20, very hmac-sha256";
-	unsigned char* ciphertext = NULL;
-	int ciphertextLen;
-	unsigned char* plaintext_from_decryption = NULL;
-	int plaintextLen;
-	ui->Print("%d", EncryptThenMAC(plaintext, strlen((const char*)plaintext)+1, sharedkey, sharedkey, &ciphertext, ciphertextLen));
-	ui->Print("%d\n", MACThenDecrypt(ciphertext, ciphertextLen, sharedkey, sharedkey, &plaintext_from_decryption, plaintextLen));
-	ui->Print("%d %d\n", ciphertextLen, plaintextLen);
-	ui->Print("Original plaintext:  %s\n", plaintext);
-	ui->Print("Decrypted plaintext: %s\n", plaintext_from_decryption);
-	WriteToHost(ciphertext, 12 + 36 + 32);
-	unsigned char recv_ciphertext[12 + 45 + 32];
-	unsigned char* recv_plaintext = NULL;
-	int recv_plaintextLen;
-	ReadFromHost(recv_ciphertext, 12 + 45 + 32);
-	MACThenDecrypt(recv_ciphertext, 12 + 45 + 32, sharedkey, sharedkey, &recv_plaintext, recv_plaintextLen);
-	ui->Print("received = %s\n", recv_plaintext);
+	// Receive the encrypted signature of (hostkey || pubkey), decrypt it, then verify it.
+	ReadFromHost_plain(recv_encsig, 12 + 64 + 32);
+	MACThenDecrypt(recv_encsig, 12 + 64 + 32, encryptkey, mackey, &recv_sig, recv_sig_len);
+	memcpy(concatenated2, hostkey, 32);
+	memcpy(concatenated2 + 32, pubkey, 32);
+	if ( ED25519_verify(concatenated2, 64, recv_sig, VERIFIER_ED25519_PUBKEY) != 1 )
+	{
+		free(recv_sig);
+		return false;
+	}
+	free(recv_sig);
 
-	// TODO
+	// Export the generated keys.
+	g_encryptKey = (unsigned char*)malloc(32);
+	g_macKey = (unsigned char*)malloc(32);
+	memcpy(g_encryptKey, encryptkey, 32);
+	memcpy(g_macKey, mackey, 32);
 
 	return true;
 }
+
+// Encrypted and authenticated variant of ReadFromHost_plain().
+ssize_t ReadFromHost(void* inBuf, size_t iNumBytes)
+{
+	unsigned char* ciphertext;
+	int ciphertextLen;
+	unsigned char* plaintext;
+	int plaintextLen;
+
+	ciphertext = (unsigned char*)malloc(12 + iNumBytes + 32);
+	ciphertextLen = ReadFromHost_plain(ciphertext, 12 + iNumBytes + 32);
+	if ( ciphertextLen < 0 )
+		return ciphertextLen;
+	if ( !MACThenDecrypt(ciphertext, ciphertextLen, g_encryptKey, g_macKey, &plaintext, plaintextLen) )
+	{
+		free(ciphertext);
+		return -1;
+	}
+
+	free(ciphertext);
+	memcpy(inBuf, plaintext, plaintextLen);
+	free(plaintext);
+	return plaintextLen;
+}
+
+// Encrypted and authenticated variant of WriteToHost_plain().
+ssize_t WriteToHost(const void* outBuf, size_t iNumBytes)
+{
+	unsigned char* plaintext;
+	unsigned char* ciphertext;
+	int ciphertextLen;
+	int bytesWritten;
+
+	plaintext = (unsigned char*)outBuf;
+	if ( !EncryptThenMAC(plaintext, iNumBytes, g_encryptKey, g_macKey, &ciphertext, ciphertextLen) )
+		return -1;
+	bytesWritten = WriteToHost_plain(ciphertext, ciphertextLen);
+
+	free(ciphertext);
+	return bytesWritten;
+}
+
+#endif	// SECURE_USB_COMMS

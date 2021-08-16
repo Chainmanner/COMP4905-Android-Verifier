@@ -23,8 +23,11 @@
 // NOTE: Keys generating using "openssl genpkey -text -algorithm ed25519". See the corresponding source files for the private keys.
 // FIXME: I know configurations are hardcoded, but this doesn't seem like a great idea. Maybe keep the public/private keys in separate
 //	  files? And have a script to regenerate keys?
-#define VERIFIER_ED25519_PUBKEY "\x13\x08\xc5\x80\xc7\x84\xa9\x1f\x6c\x5d\x2b\x95\x1e\x34\x32\x41\xa4\x97\x39\x63\x24\xd7\x1a\xef\x19\x15\x39\x0b\x89\x6e\x50\x79"
-#define RECOVERY_ED25519_PUBKEY "\x5a\xf8\x16\x1d\x67\x7d\x37\x91\x93\xd4\x48\xa3\x8b\x29\x02\x07\xec\xe8\x7b\x25\xaa\x52\xd8\x04\x08\x0c\xa0\x8a\xe0\x7e\x45\x70"
+#define VERIFIER_ED25519_PUBKEY (unsigned char*)"\x13\x08\xc5\x80\xc7\x84\xa9\x1f\x6c\x5d\x2b\x95\x1e\x34\x32\x41\xa4\x97\x39\x63\x24\xd7\x1a\xef\x19\x15\x39\x0b\x89\x6e\x50\x79"
+#define RECOVERY_ED25519_PUBKEY (unsigned char*)"\x5a\xf8\x16\x1d\x67\x7d\x37\x91\x93\xd4\x48\xa3\x8b\x29\x02\x07\xec\xe8\x7b\x25\xaa\x52\xd8\x04\x08\x0c\xa0\x8a\xe0\x7e\x45\x70"
+// These two are needed for HKDF.
+#define HKDF_SALT (unsigned char*)"the saltiest of the salts"			// Used for the "extract" part of HKDF.
+#define HKDF_INFO (unsigned char*)"does this need to be random or something"	// Used for the "expand" part of HKDF.
 
 // Commands
 #define CMD_GET_PARTS			0x9d

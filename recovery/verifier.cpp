@@ -344,8 +344,16 @@ int main(int argc, char** argv)
 	android::base::WaitForProperty("sys.usb.state", "VERIFIER");
 	ui->Print(" FunctionFS set up\n\n");
 
-	// FIXME: NOT YET DONE
-	PerformECDHEKeyExchange(ui);
+#ifdef SECURE_USB_COMMS
+	if ( PerformECDHEKeyExchange() )
+		ui->Print(" ECDHE key exchange successful\n\n");
+	else
+	{
+		ui->Print(" !! ECDHE key exchange failed! Rebooting to bootloader... !!\n\n");
+		android::base::SetProperty(ANDROID_RB_PROPERTY, "reboot,bootloader");
+		return -1;
+	}
+#endif
 
 	// Device-side verifier loop. Receives and executes commands from the host.
 	// TODO: Comms have no encryption or verification. Implement that!
