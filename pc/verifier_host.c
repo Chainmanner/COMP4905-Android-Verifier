@@ -1,5 +1,4 @@
 // TODO: Add comments.
-// TODO: Implement device-to-host encryption.
 
 #include <dirent.h>
 #include <errno.h>
@@ -22,6 +21,9 @@
 #include <openssl/sha.h>
 
 #include "verifier_constants.h"
+#include "pubkey_verifier.h"
+#include "privkey_verifier.h"
+#include "pubkey_recovery.h"
 
 
 // ==== PREPROCESSOR DEFS ====
@@ -33,8 +35,6 @@
 
 #define USB_TRANSFER_LIMIT (16 * 1024)
 #define TIMEOUT 0
-
-#define VERIFIER_ED25519_PRIVKEY (unsigned char*)"\xb3\x08\x48\x7f\xee\xa3\x8f\xeb\xda\x47\xf9\x64\xfb\xe4\x9c\x85\xdf\xa4\xeb\xdb\xb2\x38\x34\x1d\xe6\xc0\xde\x87\x09\x4b\x80\x39"
 
 #define HASHFUNC EVP_blake2b512()	// The hash function to use.
 #define HASHLEN 64			// The length of the hash function's digest in BYTES.
@@ -136,9 +136,12 @@ ssize_t WriteToDevice(int descFD, int epOutID, const void* outBuf, size_t numByt
 
 #ifdef SECURE_USB_COMMS
 
-// TODO: Describe this.
-// NOTE: encryptKey and macKey must both be 32 bytes (256 bits).
-// NOTE: ciphertext is dynamically allocated. Don't forget to free() it.
+// Encrypts and authenticates the plaintext using ChaCha20 and HMAC-SHA256, respectively, and following encrypt-then-MAC.
+// encryptKey and macKey must both be 32 bytes (256 bits).
+// On success (which is all the time unless the PC's out of memory), a pointer to the ciphertext and its length are set.
+// The structure of the returned ciphertext is:
+//	nonce (12 bytes)  +  ciphertext (plaintextLen bytes)  +  HMAC-SHA256 tag (32 bytes)
+// ciphertext is dynamically allocated with malloc() (unless an error happens), so don't forget to free() it when you're done with it.
 int EncryptThenMAC(const unsigned char* plaintext, int plaintextLen, const unsigned char* encryptKey, const unsigned char* macKey,
 			unsigned char** ciphertext, int* ciphertextLen)
 {
@@ -183,7 +186,7 @@ int EncryptThenMAC(const unsigned char* plaintext, int plaintextLen, const unsig
 		goto error;
 
 	// Generate the MAC tag.
-	if ( HMAC(EVP_sha256(), macKey, 32, *ciphertext + 12, plaintextLen, *ciphertext + (*ciphertextLen - 32), NULL) == NULL )
+	if ( HMAC(EVP_sha256(), macKey, 32, *ciphertext, plaintextLen + 12, *ciphertext + (*ciphertextLen - 32), NULL) == NULL )
 		goto error;
 
 	EVP_CIPHER_CTX_free(chachaCTX);
@@ -195,9 +198,10 @@ int EncryptThenMAC(const unsigned char* plaintext, int plaintextLen, const unsig
 	return -1;
 }
 
-// TODO: Describe this.
-// NOTE: encryptKey and macKey must both be 32 bytes (256 bits).
-// NOTE: ciphertext is dynamically allocated. Don't forget to free() it.
+// Authenticates and decrypts the ciphertext using HMAC-SHA256 and ChaCha20, respectively.
+// encryptKey and macKey must both be 32 bytes (256 bits).
+// If the nonce, ciphertext, or MAC tag are modifiedd, this operation fails. It should succeed otherwise, unless you're out of memory.
+// plaintext is dynamically allocated with malloc() (unless an error happens), so don't forget to free() it when you're done with it.
 int MACThenDecrypt(const unsigned char* ciphertext, int ciphertextLen, const unsigned char* encryptKey, const unsigned char* macKey,
 			unsigned char** plaintext, int* plaintextLen)
 {
@@ -210,7 +214,7 @@ int MACThenDecrypt(const unsigned char* ciphertext, int ciphertextLen, const uns
 	*plaintextLen = ciphertextLen - 12 - 32;
 
 	// Check the HMAC.
-	if ( HMAC(EVP_sha256(), macKey, 32, ciphertext + 12, *plaintextLen, reconstructed_hmac, NULL) == NULL )
+	if ( HMAC(EVP_sha256(), macKey, 32, ciphertext, *plaintextLen + 12, reconstructed_hmac, NULL) == NULL )
 		return -1;
 
 	// HMAC check out. Set the IV.
@@ -249,8 +253,9 @@ int MACThenDecrypt(const unsigned char* ciphertext, int ciphertextLen, const uns
 unsigned char* g_encryptKey;
 unsigned char* g_macKey;
 
-// TODO: Describe this.
-// The operation fails if any of the data received fails to be verified.
+// Derives two shared keys - one for encryption, one for MAC - using the Station-to-Station (StS) protocol.
+// Elliptic-curve Diffie-Hellman using X25519 is used for the exchange itself, and Ed25519 is used for the signatures.
+// The operation fails iff any of the data received fails to be verified.
 int PerformECDHEKeyExchange(int descFD, int epInID, int epOutID)
 {
         EVP_PKEY_CTX* keygenCTX;
@@ -425,34 +430,29 @@ ssize_t WriteToDevice(int descFD, int epOutID, const void* outBuf, size_t numByt
 // Since you can't scroll through the device's log, this should be printed on the host's end in case the user misses something.
 const char* GetErrorString(char code)
 {
-	char code_str[2];
-	code_str[0] = code;
-	code_str[1] = '\0';
-
-	// TODO: Change these to directly compare the first character, e.g. code = ERR_NO_ARG[0].
-	if ( !strncmp(code_str, ERR_NO_ARG, 1) )
+	if ( code == ERR_NO_ARG[0] )
 		return "No argument provided";
-	if ( !strncmp(code_str, ERR_DIR_CLIMBING, 1) )
+	if ( code == ERR_DIR_CLIMBING[0] )
 		return "Directory traversal detected";
-	if ( !strncmp(code_str, ERR_STAT, 1) )
+	if ( code == ERR_STAT[0] )
 		return "stat(2) failed";
 	if ( code == ERR_IOCTL[0] )
 		return "ioctl(2) failed";
-	if ( !strncmp(code_str, ERR_MKDIR, 1) )
+	if ( code == ERR_MKDIR[0] )
 		return "mkdir(2) failed";
-	if ( !strncmp(code_str, ERR_MOUNT, 1) )
+	if ( code == ERR_MOUNT[0] )
 		return "mount(2) failed";
-	if ( !strncmp(code_str, ERR_UMOUNT, 1) )
+	if ( code == ERR_UMOUNT[0] )
 		return "umount(2) failed";
-	if ( !strncmp(code_str, ERR_RMDIR, 1) )
+	if ( code == ERR_RMDIR[0] )
 		return "rmdir(2) failed";
-	if ( !strncmp(code_str, ERR_FILE_TOO_BIG, 1) )
+	if ( code == ERR_FILE_TOO_BIG[0] )
 		return "Directory traversal detected";
-	if ( !strncmp(code_str, ERR_OPEN, 1) )
+	if ( code == ERR_OPEN[0] )
 		return "open(2) failed";
-	if ( !strncmp(code_str, ERR_READ, 1) )
+	if ( code == ERR_READ[0] )
 		return "read(2) failed";
-	if ( !strncmp(code_str, SUCCESS, 1) )
+	if ( code == SUCCESS[0] )
 		return "<success>";
 	if ( code == FILE_CONTENT[0] )
 		return "Transmission not yet done";
@@ -555,7 +555,6 @@ int ReceiveFileMetaAndHash(int descFD, int epInID, struct file_metadata* fm, uns
 	size_t i;
 	EVP_MD_CTX* ctx;
 
-	// TODO: In the case of symlinks, also receive and check the destination.
 	if ( ReadFromDevice(descFD, epInID, responseMetadata, 1 + sizeof(struct file_metadata)) < 0 )
 		return -1;
 
@@ -602,8 +601,8 @@ int ReceiveFileMetaAndHash(int descFD, int epInID, struct file_metadata* fm, uns
 		printf("!! Error receiving data for %s: %s !!\n", fm->filepath, GetErrorString(responseFileBlock[0]));
 		return -1;
 	}
-	// TODO: Add S_ISBLK(fm->mode) as a check. Putting a TODO here because I'll need to test this.
-	if ( S_ISREG(fm->mode) && bytesReadTotal != fileSize )	// Should never happen, but let's try to detect premature termination.
+	if ( (S_ISREG(fm->mode) || S_ISBLK(fm->mode))
+		&& bytesReadTotal != fileSize )	// Should never happen, but let's try to detect premature termination.
 	{
 		printf("!! Mismatch between stated file size (%lu) and bytes received (%lu) !!\n", fileSize, bytesReadTotal);
 		return -1;
@@ -846,7 +845,11 @@ int main(int argc, char** argv)
 #ifdef SECURE_USB_COMMS
 	// Perform the ephemeral elliptic-curve Diffie-Hellman exchange.
 	if ( PerformECDHEKeyExchange(descFD, epInID, epOutID) < 0 )
-		printf("!! ECDHE key exchange failed --\n");
+	{
+		printf("!! ECDHE key exchange failed - unplug the device to make it shut down --\n");
+		close(descFD);
+		return -1;
+	}
 	else
 		printf("-- ECDHE key exchange successful --\n");
 #endif

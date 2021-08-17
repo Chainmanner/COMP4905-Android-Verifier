@@ -21,11 +21,9 @@
 #include <openssl/sha.h>
 
 #include "verifier_constants.h"
-
-// FIXME: TEST CODE
-#include "recovery_ui/device.h"
-#include "recovery_ui/stub_ui.h"
-#include "recovery_ui/ui.h"
+#include "pubkey_verifier.h"
+#include "pubkey_recovery.h"
+#include "privkey_recovery.h"
 
 
 // == PREPROCESSOR DEFS ==
@@ -39,8 +37,6 @@
 #define CONTROL_PATH "/dev/usb-ffs/VERIFIER/ep0"
 #define OUT_PATH "/dev/usb-ffs/VERIFIER/ep1"
 #define IN_PATH "/dev/usb-ffs/VERIFIER/ep2"
-
-#define RECOVERY_ED25519_PRIVKEY (unsigned char*)"\xc9\x67\xcf\x1f\xab\x98\xdb\x78\x6d\x44\x4d\xfb\x1f\x72\x03\x75\xbe\xe9\x9c\xad\x2f\xac\x27\xf3\xd6\xe1\xac\x4f\xb4\x0e\x62\x8f"
 
 
 // USB interface descriptor.
@@ -311,7 +307,7 @@ bool EncryptThenMAC(const unsigned char* plaintext, int plaintextLen, const unsi
 	CRYPTO_chacha_20(*ciphertext + 12, plaintext, plaintextLen, encryptKey, nonce, 0);
 
 	// Generate the MAC tag.
-	if ( HMAC(EVP_sha256(), macKey, 32, *ciphertext + 12, plaintextLen, *ciphertext + (ciphertextLen - 32), NULL) == NULL )
+	if ( HMAC(EVP_sha256(), macKey, 32, *ciphertext, plaintextLen + 12, *ciphertext + (ciphertextLen - 32), NULL) == NULL )
 	{
 		free(*ciphertext);
 		return false;
@@ -333,7 +329,7 @@ bool MACThenDecrypt(const unsigned char* ciphertext, int ciphertextLen, const un
 	plaintextLen = ciphertextLen - 12 - 32;
 
 	// Check the HMAC.
-	if ( HMAC(EVP_sha256(), macKey, 32, ciphertext + 12, plaintextLen, reconstructed_hmac, NULL) == NULL )
+	if ( HMAC(EVP_sha256(), macKey, 32, ciphertext, plaintextLen + 12, reconstructed_hmac, NULL) == NULL )
 		return false;
 	if ( memcmp(reconstructed_hmac, ciphertext + (ciphertextLen - 32), 32) != 0 )
 		return false;

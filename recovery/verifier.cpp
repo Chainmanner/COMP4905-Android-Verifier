@@ -337,6 +337,7 @@ int main(int argc, char** argv)
 	if ( !InitFunctionFS() )
 	{
 		ui->Print(" !! Failed to init FunctionFS! Rebooting to bootloader... !!\n\n");
+		sleep(5);
 		android::base::SetProperty(ANDROID_RB_PROPERTY, "reboot,bootloader");
 		return -EIO;
 	}
@@ -350,6 +351,7 @@ int main(int argc, char** argv)
 	else
 	{
 		ui->Print(" !! ECDHE key exchange failed! Rebooting to bootloader... !!\n\n");
+		sleep(5);
 		android::base::SetProperty(ANDROID_RB_PROPERTY, "reboot,bootloader");
 		return -1;
 	}
