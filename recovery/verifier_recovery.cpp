@@ -333,21 +333,7 @@ int main(int argc, char** argv)
 		android::base::SetProperty(ANDROID_RB_PROPERTY, "reboot,bootloader");
 		return -EIO;
 	}
-	android::base::SetProperty("sys.usb.config", "VERIFIER");
-	android::base::WaitForProperty("sys.usb.state", "VERIFIER");
 	ui->Print(" USB comms set up\n\n");
-
-#ifdef SECURE_USB_COMMS
-	if ( PerformECDHEKeyExchange() )
-		ui->Print(" ECDHE key exchange successful\n\n");
-	else
-	{
-		ui->Print(" !! ECDHE key exchange failed! Rebooting to bootloader... !!\n\n");
-		sleep(5);
-		android::base::SetProperty(ANDROID_RB_PROPERTY, "reboot,bootloader");
-		return -1;
-	}
-#endif
 
 	// Device-side verifier loop. Receives and executes commands from the host.
 	ui->Print(" Ready to receive commands...\n\n");

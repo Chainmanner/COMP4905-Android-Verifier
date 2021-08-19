@@ -21,13 +21,6 @@ ssize_t ReadFromHost(void* inBuf, size_t iNumBytes);
 // outBuf is the buffer containing the data to be sent.
 ssize_t WriteToHost(const void* outBuf, size_t iNumBytes);
 
-// NOTE: Functions ReadFromHost_plain(), WriteToHost_plain(), EncryptThenMAC(), and MACThenDecrypt() are not exported, as they are not
-// needed outside usb_comms.cpp.
-#ifdef SECURE_USB_COMMS
-// If authenticate encryption for USB communications is enabled, the below function will perform an ephemeral elliptic-curve
-// Diffie-Hellman key exchange with the verifier to generate a shared secret, then derive an encryption key and a separate MAC key.
-// These keys are stored as globals within usb_comms.cpp.
-bool PerformECDHEKeyExchange();
-#endif
+// NOTE: Functions only available when SECURE_USB_COMMS is defined are not exported, as they're not needed outside of usb_comms.cpp.
 
 #endif	// USB_COMMS_H

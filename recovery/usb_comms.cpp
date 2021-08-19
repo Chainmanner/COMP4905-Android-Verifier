@@ -30,6 +30,7 @@
 #include "verifier_constants.h"
 #ifdef SECURE_USB_COMMS
 #include "pubkey_verifier.h"
+#include "pubkey_recovery.h"
 #include "privkey_recovery.h"
 #endif
 
@@ -181,54 +182,14 @@ int iControlFD;
 int iOutFD;
 int iInFD;
 
+#ifdef SECURE_USB_COMMS
 // Encryption and MAC keys.
 unsigned char* g_encryptKey;
 unsigned char* g_macKey;
+#endif
 
 
 // == FUNCTIONS ==
-
-// Opens the control endpoint, then writes the descriptors and strings to it.
-// Then, opens the output and input endpoints.
-// NOTE: Runs under the assumption that initialization has NOT been done before.
-bool InitUSBComms()
-{
-	int ret;
-	iControlFD = open(CONTROL_PATH, O_RDWR);
-	if ( iControlFD < 0 )
-		return false;
-
-	ret = write(iControlFD, &verifier_descriptors, sizeof(verifier_descriptors));
-	if ( ret < 0 )
-		return false;
-	ret = write(iControlFD, &verifier_strings, sizeof(verifier_strings));
-	if ( ret < 0 )
-		return false;
-	// Good to go.
-	android::base::SetProperty("sys.usb.ffs.ready", "1");
-
-	// Opens the output and input endpoints.
-	iOutFD = open(OUT_PATH, O_WRONLY);
-	if ( iOutFD < 0 )
-		return false;
-	iInFD = open(IN_PATH, O_RDONLY);
-	if ( iInFD < 0 )
-		return false;
-
-	return true;
-}
-
-// Closes the file descriptors, and frees encryption and MAC keys if applicable.
-void CloseUSBComms()
-{
-	close(iControlFD);
-	close(iOutFD);
-	close(iInFD);
-#ifdef SECURE_USB_COMMS
-	free(g_encryptKey);
-	free(g_macKey);
-#endif
-}
 
 // Reads at most iNumBytes bytes from the host and store them in inBuf.
 // Returns either the number of bytes read, or -1 if an error occurred.
@@ -470,3 +431,54 @@ ssize_t WriteToHost(const void* outBuf, size_t iNumBytes)
 }
 
 #endif	// SECURE_USB_COMMS
+
+// Opens the control endpoint, then writes the descriptors and strings to it.
+// Then, opens the output and input endpoints and activates the USB interface.
+// If authenticated encryption is enabled, also performs the key exchange with the verifier.
+// NOTE: Runs under the assumption that initialization has NOT been done before.
+bool InitUSBComms()
+{
+	int ret;
+	iControlFD = open(CONTROL_PATH, O_RDWR);
+	if ( iControlFD < 0 )
+		return false;
+
+	ret = write(iControlFD, &verifier_descriptors, sizeof(verifier_descriptors));
+	if ( ret < 0 )
+		return false;
+	ret = write(iControlFD, &verifier_strings, sizeof(verifier_strings));
+	if ( ret < 0 )
+		return false;
+	// Good to go.
+	android::base::SetProperty("sys.usb.ffs.ready", "1");
+
+	// Opens the output and input endpoints.
+	iOutFD = open(OUT_PATH, O_WRONLY);
+	if ( iOutFD < 0 )
+		return false;
+	iInFD = open(IN_PATH, O_RDONLY);
+	if ( iInFD < 0 )
+		return false;
+	
+	// Verifier's ready to communicate.
+	android::base::SetProperty("sys.usb.config", "VERIFIER");
+	android::base::WaitForProperty("sys.usb.state", "VERIFIER");
+
+#ifdef SECURE_USB_COMMS
+	return PerformECDHEKeyExchange();	// Last part is to perform the key exchange.
+#else
+	return true;
+#endif
+}
+
+// Closes the file descriptors, and frees encryption and MAC keys if applicable.
+void CloseUSBComms()
+{
+	close(iControlFD);
+	close(iOutFD);
+	close(iInFD);
+#ifdef SECURE_USB_COMMS
+	free(g_encryptKey);
+	free(g_macKey);
+#endif
+}

@@ -60,6 +60,7 @@ printf '// AUTO-GENERATED - DO NOT MODIFY
 
 #endif' "$recovery_pubkey" > pubkey_recovery.h
 cp pubkey_recovery.h pc/
+cp pubkey_recovery.h recovery/
 rm pubkey_recovery.h
 
 # privkey_recovery.h

@@ -8,6 +8,15 @@
 
 #include "verifier_constants.h"
 
+// This function find the recovery based on its vendor and product IDs, then claims the interface and returns the interface ID, input
+// endpoint ID, and output endpoint ID.
+// Returns 0 on success, -1 on error.
+int InitUSBComms(int* descFD, int* ifID, int* epInID, int* epOutID);
+// Shuts down USB comms by closing the descriptor FD and freeing the encryption/MAC keys (if applicable).
+void CloseUSBComms(int descFD, int ifID);
+
+// NOTE: The above two functions are found near the end of usb_comms_host.c.
+
 // The below two functions read and write data from/to the connected Android device, after the recovery has finished setting itself up.
 // Note that in order to use these functions, the device's USB interface must be found and claimed.
 //	descFD is the file descriptor for the USB device file under /dev/bus/usb/...
@@ -23,15 +32,6 @@ ssize_t ReadFromDevice(int descFD, int epInID, void* inBuf, size_t numBytes);
 // outBuf is the buffer containing the data to be sent.
 ssize_t WriteToDevice(int descFD, int epOutID, const void* outBuf, size_t numBytes);
 
-// NOTE: Functions ReadFromDevice_plain(), WriteToDevice_plain(), EncryptThenMAC(), and MACThenDecrypt() are not exported, as they
-// are not needed outside usb_comms_host.c.
-#ifdef SECURE_USB_COMMS
-// If authenticate encryption for USB communications is enabled, the below function will perform an ephemeral elliptic-curve
-// Diffie-Hellman key exchange with the recovery to generate a shared secret, then derive an encryption key and a separate MAC key.
-// These keys are stored as globals within usb_comms_host.c.
-int PerformECDHEKeyExchange(int descFD, int epInID, int epOutID);
-// When the verifier is done, remember to free the encryption and MAC keys!
-void FreeKeys();
-#endif
+// NOTE: Functions only available when SECURE_USB_COMMS is defined are not exported, as they're not needed outside of usb_comms_host.c.
 
 #endif	// USB_COMMS_HOST_H
