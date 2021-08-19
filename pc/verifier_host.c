@@ -38,19 +38,13 @@
 #define HASHLEN 64			// The length of the hash function's digest in BYTES.
 
 // CHANGE THESE AND RECOMPILE THE VERIFIER
-#define NUM_PARTITIONS 4
+#define NUM_PARTITIONS 0
 const char* partitions_to_check[] = {	// NOTE: Filesystems of the provided partitions MUST be EXT4 or F2FS.
-	"system_a",
-	"system_b",
-	"vendor_a",
-	"vendor_b",
 };
 
 // CHANGE THESE AND RECOMPILE THE VERIFIER
-#define NUM_NONFS_PARTITIONS 2
+#define NUM_NONFS_PARTITIONS 0
 const char* nonfs_partitions_to_check[] = {	// These partitions don't have a valid filesystem, so we check them in their entirety.
-	"boot_a",
-	"boot_b",
 };
 
 
