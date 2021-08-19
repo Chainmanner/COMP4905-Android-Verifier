@@ -1,9 +1,11 @@
-// TODO: Add a description about this file.
-// TODO: Need to add MitM protections, if possible.
-// FIXME: There are no checks to make sure that size_t really is 64 bits long, just like uint64_t. THIS COULD BE DANGEROUS.
+// COMP4905 - Honours Project, Carleton University
+// Gabriel Valachi (101068875)
+
+// This is the main file for the recovery part of the verification system. When USB communications are set up, the recovery waits for
+// and acts upon commands received from the verifier.
+// Build instructions are in a separate file, since they're kind of long.
 
 // IMPORTS
-// TODO: Clean up unused imports.
 
 #include <dirent.h>
 #include <dlfcn.h>
@@ -15,6 +17,7 @@
 #include <linux/fs.h>
 #include <linux/magic.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -71,15 +74,15 @@ void SendFileToHost(int filepathLen, const char* filepath, bool followSymlinks)
 	int ret;
 	struct stat statbuf;
 	struct file_metadata fm;
-	ssize_t bytesRead, bytesToRead, bytesLeftToRead;
+	int64_t bytesRead, bytesToRead, bytesLeftToRead;
 	char* selinuxContext_temp = nullptr;
 	uint64_t blockDevSize_temp;
 	DIR* curDirPtr;
-	int numItems;
+	uint64_t numItems;
 	char responseMetadata[1 + ARG_MAX_LEN + sizeof(struct file_metadata)];
 	int fileFD = -1;
 	char responseFileBlock[1 + FILE_TRANSFER_BLOCK_SIZE];
-	long bytesSent;
+	ssize_t bytesSent;
 	unsigned long i;
 
 	// Get the file metadata.
@@ -128,7 +131,6 @@ void SendFileToHost(int filepathLen, const char* filepath, bool followSymlinks)
 			WriteToHost(ERR_IOCTL, 1);
 			return;
 		}
-		// FIXME: What if size_t isn't an unsigned long?
 		fm.fileSize = blockDevSize_temp;
 	}
 	else if ( S_ISDIR(statbuf.st_mode) )	// For directories, the size is the number of elements. Need to detect added files too.
@@ -181,7 +183,7 @@ void SendFileToHost(int filepathLen, const char* filepath, bool followSymlinks)
 #ifdef VERBOSE
 	ui->Print(" File %s (%lu):\n", fm.filepath, fm.filepathLen);
 	ui->Print("     Followed Symlink: %d\n", followSymlinks);
-	ui->Print("     Size: %ld\n", fm.fileSize);
+	ui->Print("     Size: %lu\n", fm.fileSize);
 	ui->Print("     UID: %d\n", fm.uid);
 	ui->Print("     GID: %d\n", fm.gid);
 	ui->Print("     Mode: %o\n", fm.mode);
@@ -290,23 +292,14 @@ int SendAllUnderDir(int dirpathLen, const char* dirpath)
 
 int main(int argc, char** argv)
 {
-	// TODO: Anything other preliminary steps?
-
 	// Load in the device-specific recovery UI library.
+	// NOTE: Verification can still be done without the UI.
 	void* librecovery_ui_ext = dlopen("librecovery_ui_ext.so", RTLD_NOW);
 	using MakeDeviceType = decltype(&make_device);
 	MakeDeviceType make_device_func = nullptr;
-	if ( librecovery_ui_ext == nullptr )
-	{
-		// TODO: Failed to load recovery UI library.
-	}
-	else
+	if ( librecovery_ui_ext != nullptr )
 	{
 		reinterpret_cast<void*&>(make_device_func) = dlsym(librecovery_ui_ext, "make_device");
-		if ( make_device_func == nullptr )
-		{
-			// TODO: Failed to get the address of the device-specific make_device symbol.
-		}
 	}
 
 	Device* device;
@@ -332,18 +325,17 @@ int main(int argc, char** argv)
 
 	ui->Print(" VERIFIER\n\n");
 
-	// Sets up FunctionFS.
-	// TODO: Are there phones currently in use that DON'T support ConfigFS and/or FunctionFS? If so, I need to account for them.
-	if ( !InitFunctionFS() )
+	// Sets up USB comms via ConfigFS and FunctionFS.
+	if ( !InitUSBComms() )
 	{
-		ui->Print(" !! Failed to init FunctionFS! Rebooting to bootloader... !!\n\n");
+		ui->Print(" !! Failed to setup USB comms! Rebooting to bootloader... !!\n\n");
 		sleep(5);
 		android::base::SetProperty(ANDROID_RB_PROPERTY, "reboot,bootloader");
 		return -EIO;
 	}
 	android::base::SetProperty("sys.usb.config", "VERIFIER");
 	android::base::WaitForProperty("sys.usb.state", "VERIFIER");
-	ui->Print(" FunctionFS set up\n\n");
+	ui->Print(" USB comms set up\n\n");
 
 #ifdef SECURE_USB_COMMS
 	if ( PerformECDHEKeyExchange() )
@@ -358,7 +350,6 @@ int main(int argc, char** argv)
 #endif
 
 	// Device-side verifier loop. Receives and executes commands from the host.
-	// TODO: Comms have no encryption or verification. Implement that!
 	ui->Print(" Ready to receive commands...\n\n");
 	ssize_t bytesRead;
 	char recvMsg[1 + ARG_MAX_LEN];	// Includes the action to perform and the file to send (if applicable).
@@ -389,6 +380,7 @@ int main(int argc, char** argv)
 		{
 			ui->Print(" !! Error while receiving a command: %s !!\n\n", strerror(errno));
 			ui->Print(" !! Connection may be done for - REBOOTING TO BOOTLOADER !!\n\n");
+			CloseUSBComms();
 			sleep(5);
 			android::base::SetProperty(ANDROID_RB_PROPERTY, "reboot,bootloader");
 			return -1;
@@ -581,7 +573,7 @@ int main(int argc, char** argv)
 
 			// Reboots the device to the bootloader.
 			case CMD_SHUTDOWN:
-				// TODO: Close the open file descriptors.
+				CloseUSBComms();
 				ui->Print("\n\n Rebooting to the bootloader in 5 seconds. Have a nice day!\n\n");
 				sleep(5);
 				android::base::SetProperty(ANDROID_RB_PROPERTY, "reboot,bootloader");

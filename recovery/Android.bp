@@ -1,4 +1,7 @@
-// TODO: Add a description for this file.
+// COMP4905 - Honours Project, Carleton University
+// Gabriel Valachi (101068875)
+
+// Contains definitions needed to build the recovery program and its dependencies.
 
 cc_defaults {
 	name: "recovery_defaults",
@@ -46,7 +49,7 @@ cc_binary {
 	],
 	srcs: [
 		"usb_comms.cpp",
-		"verifier.cpp",
+		"verifier_recovery.cpp",
 	],
 	shared_libs: [
 		"librecovery_ui",

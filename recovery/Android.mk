@@ -1,4 +1,8 @@
-# TODO: Add a description for this file.
+# COMP4905 - Honours Project, Carleton University
+# Gabriel Valachi (101068875)
+
+# Contains some definitions needed to build the recovery ramdisk.
+# NOTE: Turns out this file isn't necessary, but I'll keep it in anyway.
 
 LOCAL_PATH := $(call my-dir)
 
@@ -29,6 +33,3 @@ LOCAL_SHARED_LIBRARIES := \
 include $(BUILD_SHARED_LIBRARY)
 
 include $(CLEAR_VARS)
-
-# TODO: Do I need this?
-#LOCAL_MODULE := recovery_deps

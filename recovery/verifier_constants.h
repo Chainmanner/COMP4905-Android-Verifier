@@ -1,5 +1,10 @@
+// COMP4905 - Honours Project, Carleton University
+// Gabriel Valachi (101068875)
+
 #ifndef VERIFIER_CONSTANTS_H
 #define VERIFIER_CONSTANTS_H
+
+#include <stdint.h>
 
 // Definitions that must be consistent on the device AND host code.
 
@@ -19,7 +24,9 @@
 #define OUT_ADDR (1 | USB_DIR_OUT)	// NOTE: "Out" from the host's perspective.
 
 // Comms Security
-#define SECURE_USB_COMMS	// Comment this out to disable encryption and authentication for USB comms.
+// Uncomment this preprocessor def to enable authenticated encryption for USB comms.
+// This will protect against the highly unlikely case of a malicious USB cable, but the verification will take ~3.5 times longer.
+//#define SECURE_USB_COMMS
 // These two are needed for HKDF.
 #define HKDF_SALT (unsigned char*)"the saltiest of the salts"			// Used for the "extract" part of HKDF.
 #define HKDF_INFO (unsigned char*)"does this need to be random or something"	// Used for the "expand" part of HKDF.
@@ -51,16 +58,16 @@
 
 // Apparently the stat struct may differ across architectures, so to be safe, here's a definition with only the necessary types.
 struct file_metadata {
-	size_t	filepathLen;
-	char	filepath[ARG_MAX_LEN];
-	uid_t	uid;
-	gid_t	gid;
-	mode_t	mode;
-	size_t	contextLen;
-	char	selinuxContext[SELINUX_CONTEXT_MAX_LEN];
-	size_t	symlinkDestLen;
-	char	symlinkDest[ARG_MAX_LEN];
-	size_t	fileSize;
+	size_t		filepathLen;
+	char		filepath[ARG_MAX_LEN];
+	uid_t		uid;
+	gid_t		gid;
+	mode_t		mode;
+	size_t		contextLen;
+	char		selinuxContext[SELINUX_CONTEXT_MAX_LEN];
+	size_t		symlinkDestLen;
+	char		symlinkDest[ARG_MAX_LEN];
+	uint64_t	fileSize;	// Needs to be 64 bits long due to the use of the BLKGETSIZE64 ioctl call.
 };
 
 

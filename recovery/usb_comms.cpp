@@ -1,7 +1,14 @@
-// NOTE: Some source code taken from the relevant Fastboot device code (system/core/fastboot/device/usb_device.cpp) and from the Linux
-//	 FunctionFS example (tools/usb/ffs-test.c).
-// TODO: Add comments to this file.
-// FIXME: There are still some unfinished parts. Complete them before finalizing the project.
+// COMP4905 - Honours Project, Carleton University
+// Gabriel Valachi (101068875)
+
+// This file contains the code needed for the recovery to communicate with the verifier over USB.
+// This includes setting up the USB connection. In order to do that, the FunctionFS endpoint at /dev/usb-ffs/VERIFIER/ep0 must be
+// created. After InitUSBComms() is called, the vendor and product IDs of the USB interface must be set, and the USB interface must be
+// activated.
+// These additional steps are handled by the etc/init.rc file, which is run when the recovery ramdisk is loaded.
+
+// NOTE: Some source code taken from the relevant Fastboot device code (system/core/fastboot/device/usb_device.cpp in Android source
+// code) and from the Linux FunctionFS example (tools/usb/ffs-test.c in the Linux kernel source).
 
 #include <endian.h>
 #include <fcntl.h>
@@ -21,9 +28,11 @@
 #include <openssl/sha.h>
 
 #include "verifier_constants.h"
+#ifdef SECURE_USB_COMMS
 #include "pubkey_verifier.h"
 #include "pubkey_recovery.h"
 #include "privkey_recovery.h"
+#endif
 
 
 // == PREPROCESSOR DEFS ==
@@ -45,8 +54,6 @@ struct usb_interface_descriptor verifier_interface = {
 	.bDescriptorType = USB_DT_INTERFACE,
 	.bInterfaceNumber = INTERFACE_NUMBER,
 	.bNumEndpoints = 2,
-	// Class, subclass, and protocol needed in order to identify the verifier USB interface on the host's end.
-	// TODO: Do I need these? They're useful for finding the interface number and endpoint IDs, but the host already has them.
 	.bInterfaceClass = INTERFACE_CLASS,
 	.bInterfaceSubClass = INTERFACE_SUBCLASS,
 	.bInterfaceProtocol = INTERFACE_PROTOCOL,
@@ -185,30 +192,35 @@ unsigned char* g_macKey;
 // Opens the control endpoint, then writes the descriptors and strings to it.
 // Then, opens the output and input endpoints.
 // NOTE: Runs under the assumption that initialization has NOT been done before.
-bool InitFunctionFS()
+bool InitUSBComms()
 {
 	int ret;
 	iControlFD = open(CONTROL_PATH, O_RDWR);
-	// TODO: Test if the control FD has been successfully opened.
+	if ( iControlFD < 0 )
+		return false;
 
 	ret = write(iControlFD, &verifier_descriptors, sizeof(verifier_descriptors));
-	// TODO: Test if the descriptors have been successfully written.
+	if ( ret < 0 )
+		return false;
 	ret = write(iControlFD, &verifier_strings, sizeof(verifier_strings));
-	// TODO: Test if the strings have been successfully written.
+	if ( ret < 0 )
+		return false;
 	// Good to go.
 	android::base::SetProperty("sys.usb.ffs.ready", "1");
 
 	// Opens the output and input endpoints.
 	iOutFD = open(OUT_PATH, O_WRONLY);
-	// TODO: Test if the output FD has been successfully opened.
+	if ( iOutFD < 0 )
+		return false;
 	iInFD = open(IN_PATH, O_RDONLY);
-	// TODO: Test if the input FD has been successfully opened.
+	if ( iInFD < 0 )
+		return false;
 
 	return true;
 }
 
-// Closes the FunctionFS file descriptors.
-void CloseFunctionFS()
+// Closes the file descriptors, and frees encryption and MAC keys if applicable.
+void CloseUSBComms()
 {
 	close(iControlFD);
 	close(iOutFD);
@@ -324,7 +336,6 @@ bool MACThenDecrypt(const unsigned char* ciphertext, int ciphertextLen, const un
 {
 	unsigned char nonce[12];
 	unsigned char reconstructed_hmac[32];
-	// TODO: Should use pointers to the full ciphertext to reference certain parts (nonce, ciphertext itself, MAC tag).
 
 	plaintextLen = ciphertextLen - 12 - 32;
 
@@ -344,7 +355,9 @@ bool MACThenDecrypt(const unsigned char* ciphertext, int ciphertextLen, const un
 	return true;
 }
 
-// TODO: Describe this.
+// Derives two shared keys - one for encryption, one for MAC - using the Station-to-Station (StS) protocol.
+// Elliptic-curve Diffie-Hellman using X25519 is used for the exchange itself, and Ed25519 is used for the signatures.
+// The operation fails iff any of the data received fails to be verified.
 bool PerformECDHEKeyExchange()
 {
 	unsigned char pubkey[32];
