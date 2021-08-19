@@ -344,7 +344,8 @@ bool PerformECDHEKeyExchange()
 	X25519_keypair(pubkey, privkey);
 
 	// Receive the verifier's public key, then derive the shared secret.
-	ReadFromHost_plain(hostkey, 32);
+	if ( ReadFromHost_plain(hostkey, 32) < 0 )
+		return false;;
 	X25519(sharedsecret, privkey, hostkey);
 
 	// Derive two keys from the shared secret, one for encryption and the other for the MAC.
@@ -366,10 +367,12 @@ bool PerformECDHEKeyExchange()
 	memcpy(pubkey_encsig, pubkey, 32);
 	memcpy(pubkey_encsig + 32, concatenated_sig_enc, 12 + 64 + 32);
 	free(concatenated_sig_enc);
-	WriteToHost_plain(pubkey_encsig, 32 + (12 + 64 + 32));
+	if ( WriteToHost_plain(pubkey_encsig, 32 + (12 + 64 + 32)) < 0 )
+		return false;
 
 	// Receive the encrypted signature of (hostkey || pubkey), decrypt it, then verify it.
-	ReadFromHost_plain(recv_encsig, 12 + 64 + 32);
+	if ( ReadFromHost_plain(recv_encsig, 12 + 64 + 32) < 0 )
+		return false;
 	MACThenDecrypt(recv_encsig, 12 + 64 + 32, encryptkey, mackey, &recv_sig, recv_sig_len);
 	memcpy(concatenated2, hostkey, 32);
 	memcpy(concatenated2 + 32, pubkey, 32);

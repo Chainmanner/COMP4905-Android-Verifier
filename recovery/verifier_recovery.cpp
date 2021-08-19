@@ -274,10 +274,11 @@ int SendAllUnderDir(int dirpathLen, const char* dirpath)
 
 		// Send the current dirent to the host, and if it's a directory, recurse into it as well.
 		// NOTE: Don't follow symlinks, but get info about the links themselves.
-		SendFileToHost(curPath_len, curPath, false);
-		dirEntsSent++;
 		if ( curDirEnt->d_type == DT_DIR )
 			dirEntsSent += SendAllUnderDir(curPath_len, curPath);
+		else
+			SendFileToHost(curPath_len, curPath, false);
+		dirEntsSent++;
 
 		curDirEnt = readdir(curDir);
 	}
