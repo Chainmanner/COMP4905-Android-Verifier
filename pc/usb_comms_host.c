@@ -18,7 +18,6 @@
 #include "verifier_constants.h"
 #include "usb_comms_host.h"
 #ifdef SECURE_USB_COMMS
-#include "pubkey_verifier.h"
 #include "privkey_verifier.h"
 #include "pubkey_recovery.h"
 #include <openssl/evp.h>

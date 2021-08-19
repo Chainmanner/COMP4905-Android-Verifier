@@ -37,7 +37,6 @@ printf '// AUTO-GENERATED - DO NOT MODIFY
 #define VERIFIER_ED25519_PUBKEY (unsigned char*)\"%s\"
 
 #endif' "$verifier_pubkey" > pubkey_verifier.h
-cp pubkey_verifier.h pc/
 cp pubkey_verifier.h recovery/
 rm pubkey_verifier.h
 
@@ -61,7 +60,6 @@ printf '// AUTO-GENERATED - DO NOT MODIFY
 
 #endif' "$recovery_pubkey" > pubkey_recovery.h
 cp pubkey_recovery.h pc/
-cp pubkey_recovery.h recovery/
 rm pubkey_recovery.h
 
 # privkey_recovery.h

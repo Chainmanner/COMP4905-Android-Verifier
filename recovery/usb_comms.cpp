@@ -30,7 +30,6 @@
 #include "verifier_constants.h"
 #ifdef SECURE_USB_COMMS
 #include "pubkey_verifier.h"
-#include "pubkey_recovery.h"
 #include "privkey_recovery.h"
 #endif
 
