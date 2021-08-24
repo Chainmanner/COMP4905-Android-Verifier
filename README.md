@@ -1,7 +1,10 @@
 # COMP4905-Android-Verifier
 A program and recovery image that are used to verify an Android installation on a bootloader-unlocked phone. Done as part of my Honours Project at Carleton University.
 
-NOTE: The files under `recovery/bootloader_message/`, `recovery/minui/`, `recovery/recovery_ui/` and `recovery/res-xhdpi/`, which are needed for the recovery to be built, are from the Android Open Source Project (AOSP), which uses the Apache License 2.0. Every other file is made by me and is released under the GNU General Public License v3.0.
+## License
+The files under `recovery/bootloader_message/`, `recovery/minui/`, `recovery/recovery_ui/` and `recovery/res-xhdpi/`, which are needed for the recovery to be built, are from the Android Open Source Project (AOSP), which uses the Apache License 2.0.
+
+Every other file is made by me and is released under the GNU General Public License v3.0. You're free to study, modify, and distribute every such file under the conditions of the GNU GPLv3, for any purpose whatsoever (yes, even military and intelligence purposes).
 
 ## What It Does and How to Use It
 Many Android phones can have their bootloaders unlocked and custom AOSP-based operating systems installed, but unless there's a user-settable root of trust (which as far as I know is only available on the Google Pixel and some other phones), the bootloader cannot be relocked as long as a non-stock OS is installed. This leaves the phone vulnerable to evil maid attacks, which means that anybody with physical access to it could plant malware without the owner's knowledge, although the data on the device remains encrypted.
